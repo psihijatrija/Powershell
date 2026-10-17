@@ -34,10 +34,22 @@ param(
     [switch]$SkipCode,
     [switch]$SkipReleases,
     [switch]$LatestOnly,
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Process at most this many projects, starting at -StartAt (0-based).
+    # Lets you run the set in chunks so a single invocation never runs too long.
+    [int]$StartAt = 0,
+    [int]$Take    = 0
 )
 
 $ErrorActionPreference = "Continue"
+
+# Never let git/gh block on an interactive credential or editor prompt.
+# A blocked child process is the usual cause of the loop appearing to "hang"
+# or being killed mid-run. Fail fast instead of waiting on a GUI popup.
+$env:GIT_TERMINAL_PROMPT = "0"
+$env:GCM_INTERACTIVE     = "never"
+$env:GIT_PAGER           = "cat"
+$env:GIT_EDITOR          = "true"
 
 $SkipFolders = @("releases", ".vscode", ".kiro", ".git", "node_modules")
 $Visibility  = "--public"
@@ -116,6 +128,171 @@ function Get-RemoteDefaultBranch([string]$repoFullName) {
     return "main"
 }
 
+# Normalise a raw string into a valid GitHub topic:
+# lowercase, only [a-z0-9-], collapsed dashes, trimmed, <=35 chars.
+function ConvertTo-GhTopic([string]$raw) {
+    $t = "$raw".Trim().ToLowerInvariant() -replace '[^a-z0-9-]', '-' -replace '-+', '-'
+    $t = $t.Trim('-')
+    if ($t.Length -gt 35) { $t = $t.Substring(0, 35).Trim('-') }
+    return $t
+}
+
+# Curated description + topics per project, keyed by folder/repo name.
+# This is the same hand-written metadata the standalone apply script used:
+# polished one-line descriptions and 4-7 relevant topics each. Projects not
+# listed here fall back to a minimal auto-derive (README first line + name).
+# To tweak a repo's description or tags, edit its entry here.
+$script:CuratedMeta = @{
+    "Sentinel"            = @{ d = "Userland EDR for Windows. ETW telemetry, behavioral correlation, MITRE ATT&CK."; t = @("edr","windows","security","etw","mitre-attack","csharp","threat-detection") }
+    "FTTS"                = @{ d = "2D in-browser football tactics previewer."; t = @("football","tactics","simulation","javascript","github-pages","sports") }
+    "gorstakssite"        = @{ d = "Static portfolio site for Gorstak's GitHub projects."; t = @("portfolio","static-site","github-pages","html","javascript") }
+    "GorstaksAI"          = @{ d = "In-browser LLM chat via WebGPU. No cloud, no API keys."; t = @("webllm","webgpu","llm","in-browser","react","vite","ai") }
+    "Notes"               = @{ d = "Personal knowledge base: writings, guides, and documentation."; t = @("notes","knowledge-base","documentation","guides","writing") }
+    "DriversGet"          = @{ d = "Windows tray app to fetch the latest official NVIDIA, AMD, and Intel drivers."; t = @("windows","drivers","winforms","csharp","tray-app","dotnet") }
+    "SentinelTwo"         = @{ d = "Experimental second line of the Sentinel userland EDR."; t = @("edr","windows","security","experimental") }
+    "Guardian"            = @{ d = "Auto-evicts remote intruders on a single-user Windows PC."; t = @("windows","security","intrusion-detection","remote-access","csharp","hardening") }
+    "Registry"            = @{ d = "Windows registry packs for security, privacy, and performance."; t = @("windows","registry","security","privacy","hardening","performance") }
+    "INF"                 = @{ d = "Windows INF setup scripts and security templates."; t = @("windows","inf","security","scripts","hardening") }
+    "Hrvatski"            = @{ d = "Croatian keyboard layout installer for Windows."; t = @("windows","keyboard-layout","croatian","localization") }
+    "GTalk"               = @{ d = "Serverless P2P messenger over the BitTorrent DHT. Flutter, all platforms."; t = @("p2p","messenger","bittorrent","dht","flutter","dart","serverless") }
+    "GSecurity"           = @{ d = "Windows OEM hardening and first-boot toolkit built on autounattend.xml."; t = @("windows","oem","hardening","security","autounattend","deployment") }
+    "GBrowser"            = @{ d = "Privacy-first Python/PyQt6 web browser."; t = @("browser","privacy","python","pyqt6","chromium","qtwebengine") }
+    "Ceprkac"             = @{ d = "Chrome-style WebView2 browser for Windows, with ad-block and codecs."; t = @("browser","windows","webview2","csharp","winforms","chromium") }
+    "Benchmark"           = @{ d = "Windows system benchmark with health analysis and bottleneck detection."; t = @("benchmark","windows","winforms","csharp","performance","diagnostics") }
+    "TrimKit"             = @{ d = "Windows image customizer and debloater. Open-source NTLite alternative."; t = @("windows","wim","iso","debloat","dism","wpf","csharp") }
+    "Rainmeter"           = @{ d = "Custom Rainmeter skins for desktop widgets and system monitoring."; t = @("rainmeter","skins","desktop-customization","windows","widgets") }
+    "Provisioning"        = @{ d = "Windows provisioning scripts for automated system setup."; t = @("windows","provisioning","scripts","automation") }
+    "Infinity"            = @{ d = "Party AI script for Infinity Engine games."; t = @("infinity-engine","baldurs-gate","scripting","game-mod","ai") }
+    "Harmony"             = @{ d = "Background binaural/solfeggio tone generator for Windows."; t = @("windows","audio","binaural","tone-generator","csharp","winforms") }
+    "GSecurity-Ad-Shield" = @{ d = "Chrome extension for ad-blocking and privacy."; t = @("chrome-extension","adblock","privacy","tracker-blocking","javascript") }
+    "GIDE"                = @{ d = "Fully local AI coding assistant for Windows. llama.cpp + Qwen3, no cloud."; t = @("ai","coding-assistant","local-llm","llama-cpp","qwen","csharp","windows") }
+    "Troll"               = @{ d = "Detects and removes unauthorized network bridges on Windows."; t = @("windows","network","security","csharp","bridge-removal") }
+    "RamCleaner"          = @{ d = "Lightweight Windows memory optimizer using EmptyStandbyList."; t = @("windows","memory","ram","optimization","batch") }
+    "Python"              = @{ d = "Windows-focused Python utilities: antivirus, VPN, backup, and more."; t = @("python","windows","utilities","scripts","security") }
+    "Powershell"          = @{ d = "PowerShell packs for security, EDR, detection, and hardening."; t = @("powershell","windows","security","edr","detection","hardening") }
+    "Policies"            = @{ d = "Windows security baseline via LGPO and Policy Plus."; t = @("windows","group-policy","lgpo","security","baseline","hardening") }
+    "PiHole"              = @{ d = "System-wide ad and tracker blocking for Windows via permanent routes."; t = @("windows","adblock","pihole","powershell","networking","privacy") }
+    "Pac"                 = @{ d = "PAC-based ad-blocking and GeoBlock proxy configs."; t = @("pac","proxy","adblock","userscript","privacy") }
+    "Love4Free"           = @{ d = "Free open-source PHP/MySQL dating platform."; t = @("php","mysql","dating","web","messaging") }
+    "Html"                = @{ d = "Small standalone HTML tools and pages."; t = @("html","tools","web","standalone") }
+    "Behavedr"            = @{ d = "Behavioral EDR agent with real-time detection and configurable response."; t = @("edr","security","behavioral-detection","threat-detection","cross-platform") }
+    "GS"                  = @{ d = "Minimal Windows security baseline installer (GSecurity core)."; t = @("windows","security","lgpo","hardening","baseline","batch") }
+    "GPrep"               = @{ d = "Windows post-install optimizer and bulk app installer via Winget."; t = @("windows","powershell","winget","provisioning","optimization","setup") }
+    "Debloat"             = @{ d = "NTLite and WinReducer presets for debloating Windows 11 images."; t = @("windows","debloat","ntlite","winreducer","windows-11","deployment") }
+    "C"                   = @{ d = "C-based security and ML utilities."; t = @("c","security","machine-learning","antivirus","utilities") }
+    "Batch"               = @{ d = "Windows batch scripts for hardening, firewall, and tweaks."; t = @("windows","batch","scripts","hardening","networking","security") }
+    "AutoHotkey"          = @{ d = "AutoHotkey script that auto-mutes Discord when it's focused."; t = @("autohotkey","discord","automation","windows","script") }
+}
+
+# Minimal fallback for projects not in the curated table: first meaningful
+# README line as the description, plus language topics from file extensions.
+# Returns @{ description = <string>; topics = <string[]> }.
+function Get-DerivedMetadata {
+    param([string]$ProjectPath)
+
+    $description = ""
+    $readmeFile = Get-ChildItem -Path $ProjectPath -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^README(\.md|\.txt|\.rst)?$' } |
+        Select-Object -First 1
+
+    if ($readmeFile) {
+        $lines = Get-Content $readmeFile.FullName -Encoding UTF8 -ErrorAction SilentlyContinue
+        foreach ($line in $lines) {
+            $l = $line.Trim()
+            if (-not $l) { continue }
+            if ($l -match '^#{1,6}\s' -or $l -match '^<' -or $l -match '^\|') { continue }
+            if ($l -match '^-{3,}$' -or $l -match '^\!\[' -or $l -match '^\[!\[') { continue }
+            $l = ($l -replace '^>\s*', '') -replace '\[([^\]]+)\]\([^)]+\)', '$1' -replace '[*_`]', ''
+            $l = $l.Trim()
+            if ($l) { $description = $l; break }
+        }
+    }
+    if (-not $description) { $description = Split-Path $ProjectPath -Leaf }
+    if ($description.Length -gt 250) { $description = $description.Substring(0, 247).TrimEnd() + "..." }
+
+    $topics  = New-Object System.Collections.Generic.List[string]
+    $extMap  = @{
+        ".cs" = "csharp"; ".csproj" = "dotnet"; ".py" = "python"; ".ps1" = "powershell";
+        ".bat" = "batch"; ".cmd" = "batch"; ".dart" = "dart"; ".php" = "php";
+        ".js" = "javascript"; ".ts" = "typescript"; ".html" = "html"; ".c" = "c";
+        ".cpp" = "cpp"; ".ahk" = "autohotkey"; ".reg" = "registry"; ".inf" = "inf"
+    }
+    $exts = Get-ChildItem -Path $ProjectPath -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\(\.git|\.github|\.kiro|bin|obj|node_modules)\\' } |
+        ForEach-Object { $_.Extension.ToLowerInvariant() } | Select-Object -Unique
+    foreach ($e in $exts) {
+        if ($extMap.ContainsKey($e)) {
+            $tp = ConvertTo-GhTopic $extMap[$e]
+            if ($tp -and -not $topics.Contains($tp)) { $topics.Add($tp) | Out-Null }
+        }
+    }
+    return @{ description = $description; topics = @($topics | Select-Object -First 8) }
+}
+
+# Applies description + topics to the GitHub repo via `gh repo edit`.
+# Source of metadata, in order of precedence:
+#   1. Curated table ($script:CuratedMeta), keyed by project name.
+#   2. Minimal auto-derive from local contents (for unlisted projects).
+# A failed `gh` call logs a warning without aborting the push.
+function Set-RepoMetadata {
+    param(
+        [string]$RepoFullName,
+        [string]$ProjectPath
+    )
+
+    $projName = Split-Path $ProjectPath -Leaf
+    $description = ""
+    $topics      = @()
+    $source      = ""
+
+    if ($script:CuratedMeta.ContainsKey($projName)) {
+        $description = $script:CuratedMeta[$projName].d
+        $topics      = @($script:CuratedMeta[$projName].t)
+        $source      = "curated"
+    } else {
+        $derived     = Get-DerivedMetadata -ProjectPath $ProjectPath
+        $description  = $derived.description
+        $topics       = $derived.topics
+        $source       = "auto"
+    }
+
+    $editArgs = @("repo", "edit", $RepoFullName)
+    $applied  = @()
+
+    if ($description) {
+        $editArgs += "--description"; $editArgs += $description
+        $applied  += "description"
+    }
+
+    $topicCount = 0
+    foreach ($raw in $topics) {
+        $topic = ConvertTo-GhTopic $raw
+        if ($topic) { $editArgs += "--add-topic"; $editArgs += $topic; $topicCount++ }
+    }
+    if ($topicCount -gt 0) { $applied += "$topicCount topic(s)" }
+
+    if ($applied.Count -eq 0) { return }
+
+    Write-Host "  [META] ($source) $($applied -join ', ')" -ForegroundColor Cyan
+    Write-Host "         desc: $description" -ForegroundColor DarkGray
+    if ($topicCount -gt 0) {
+        $shown = @($topics | ForEach-Object { ConvertTo-GhTopic $_ } | Where-Object { $_ })
+        Write-Host "         tags: $($shown -join ', ')" -ForegroundColor DarkGray
+    }
+
+    if ($DryRun) {
+        Write-Host "  [DRY ] Would run: gh repo edit $RepoFullName ..." -ForegroundColor Yellow
+        return
+    }
+
+    & $ghPath @editArgs 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK  ] Metadata applied" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] gh repo edit failed (exit $LASTEXITCODE)" -ForegroundColor Yellow
+    }
+}
+
 function Test-LargeFiles {
     param([string[]]$Files)
     $large = @()
@@ -181,8 +358,8 @@ function Upload-Release {
             }
         }
     } else {
-        $args = @("release", "create", $Tag) + $Files + @("--repo", $RepoFullName, "--title", $Title, "--notes", "Release $Tag")
-        & $ghPath @args 2>&1 | Out-Null
+        $createArgs = @("release", "create", $Tag) + $Files + @("--repo", $RepoFullName, "--title", $Title, "--notes", "Release $Tag")
+        & $ghPath @createArgs 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [OK  ] Created release $Tag" -ForegroundColor Green
         } else {
@@ -218,6 +395,7 @@ foreach ($project in $projects) {
     $repoFullName = "$GitHubUser/$name"
     $branch       = "main"
 
+  try {
     # ---- 1. Git push -------------------------------------------------------
     if (-not $SkipCode) {
         Push-Location $fpath
@@ -361,6 +539,12 @@ foreach ($project in $projects) {
         finally {
             Pop-Location
         }
+
+        # ---- 1b. Repo metadata (description + topics) ----------------------
+        # Applies the curated description + topics for this project (or a
+        # minimal auto-derive for unlisted ones) via `gh repo edit`, after the
+        # repo is guaranteed to exist.
+        Set-RepoMetadata -RepoFullName $repoFullName -ProjectPath $fpath
     }
 
     # ---- 2. GitHub Releases ------------------------------------------------
@@ -400,6 +584,11 @@ foreach ($project in $projects) {
         }
         $releaseOk++
     }
+  }
+  catch {
+      Write-Host "  [ERR ] $name failed: $_" -ForegroundColor Red
+      $codeFail++
+  }
 }
 
 # ---------------------------------------------------------------------------
