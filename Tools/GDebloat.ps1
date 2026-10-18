@@ -2,8 +2,9 @@
 <#
 .SYNOPSIS
     GDebloat - Master Windows 11/10 Image Optimizer & Builder.
-    Produces the smallest bootable ISO with working Microsoft Store, Xbox, Audio,
-    offline .NET Framework 3.5, and guaranteed error-free boot.wim (no missing driver errors).
+    Builds a reduced bootable ISO while preserving Store/Xbox packages and audio,
+    optional offline .NET Framework 3.5, and preserved boot.wim drivers.
+    Final size and hardware compatibility require validation on the target machine.
 
 .NOTES
     Author: Gorstak
@@ -16,7 +17,7 @@
     - tiny11maker / tiny11Coremaker / nano11builder (LabConfig bypasses on boot.wim & install.wim)
     - GSecurity ISO overlay support and autounattend generation
 
-    Key guarantees:
+    Build policy (functionality must be tested after installation):
     1. Smallest ISO Size:
        - Single-edition recovery-compressed ESD export (/Compress:recovery).
        - WinRE (winre.wim) safely removed (saves ~500-700 MB).
@@ -26,21 +27,21 @@
        - DISM component cleanup with /ResetBase.
        - NetFx3 sources\sxs payload removed from staged media once installed (saves ~300 MB).
        - Reserved storage disabled in registry (saves 7 GB on installed OS).
-    2. Store & Xbox Working:
+    2. Store & Xbox packages (Minimal browser removal can break sign-in):
        - Preserves Microsoft.WindowsStore, StorePurchaseApp, DesktopAppInstaller, etc.
        - Preserves Microsoft.GamingApp (Xbox), Microsoft.GamingServices, XboxIdentity, etc.
        - Preserves AppX dependencies: VCLibs, .NET Native, Xaml, WindowsAppRuntime.
        - Preserves AV1, HEVC, VP9, WebMedia extensions and codecs.
        - Retains and configures services: AppXSvc, ClipSVC, BITS, wuauserv, InstallService, Xbox services.
     3. Audio Working:
-       - Retains and verifies Audiosrv, AudioEndpointBuilder, and MMCSS services (Automatic start).
+       - Configures Audiosrv, AudioEndpointBuilder, and MMCSS services (Automatic start).
        - Preserves audio drivers (hdaudio.inf, wdmaudio.inf, USB/Realtek audio) and DriverStore.
        - Never deletes audio subsystem binaries (audiosrv.dll, mmdevapi.dll, etc.).
     4. Offline .NET Framework 3.5:
        - Auto-locates sources\sxs from the source ISO or accepts -NetFx3Source.
-       - Injects NetFx3 and DirectPlay offline via DISM before cleanup.
+       - Balanced mode or -EnableLegacyGamingFeatures injects NetFx3 and DirectPlay.
        - Verifies enabled state.
-    5. No Missing Driver Error in boot.wim:
+    5. Setup compatibility:
        - Keeps boot.wim DriverStore and WinSxS 100% intact (preserves all storage/USB/NVMe/AHCI drivers).
        - Preserves both boot.wim Index 1 (WinPE) and Index 2 (Windows Setup).
        - Preserves all setup provider DLLs (dismapi, imagingprovider, wimprovider, vhdprovider, WinDlp).
@@ -50,20 +51,20 @@
 
 .PARAMETER SourceIso
     Path to the source Windows 10/11 x64 ISO file, or mounted drive letter (e.g. 'D' or 'D:\').
-    If omitted, the script prompts interactively.
+    Defaults to 'C:\Downloads\Win11_24H2_English_x64.iso'; prompts if missing.
 
 .PARAMETER OutputIso
     Path where the final optimized ISO will be saved.
-    Defaults to '<CurrentDir>\Windows-Optimized-<Timestamp>.iso'.
+    Defaults to 'C:\Downloads\Windows-Gaming-Optimized.iso'.
 
 .PARAMETER WorkDirectory
     Parent directory for a unique build staging folder. Existing contents are preserved.
     Must be on an NTFS drive with at least 20 GB free.
-    Defaults to '$env:TEMP\WinBuild-<Random>' or a dedicated scratch directory.
+    Defaults to a fresh child of 'C:\ISO_Build'.
 
 .PARAMETER ImageIndex
     The edition index to extract from the source image.
-    If omitted and multiple indexes exist, an interactive menu is displayed.
+    Defaults to 6. If unavailable, selects the only edition or prompts for an index.
 
 .PARAMETER NetFx3Source
     Optional path to the folder containing NetFx3 CABs (e.g. sources\sxs).
@@ -74,6 +75,26 @@
 
 .PARAMETER OscdimgPath
     Optional explicit path to oscdimg.exe. If omitted, the script auto-discovers it.
+
+.PARAMETER SizeProfile
+    Minimal (default) removes extra optional apps and disabled feature payloads.
+    Balanced retains those extras and attempts to enable legacy gaming features.
+    Both retain drivers, servicing, and protected Store/Xbox/audio packages.
+    Minimal also deletes Edge and WebView2 payloads; Xbox/sign-in can break.
+
+.PARAMETER EnableLegacyGamingFeatures
+    Add NetFx3 (requires matching sources) and DirectPlay, increasing image size.
+
+.PARAMETER DriverDirectory
+    Folder of extracted, signed OEM INF driver packages. Added to install image
+    and every boot image. Supply only drivers appropriate for the target hardware.
+
+.PARAMETER AllowAutomaticUpdates
+    Opt back into automatic OS updates. Automatic updates are disabled by default;
+    update/servicing services remain available for Store and Xbox dependencies.
+
+.PARAMETER DisableAutomaticUpdates
+    Explicitly disable automatic OS updates (also the default).
 
 .PARAMETER KeepWinRE
     Switch to retain Windows Recovery Environment (winre.wim).
@@ -91,15 +112,20 @@ param(
     [int]$ImageIndex = 6,
     [string]$OutputIso = 'C:\Downloads\Windows-Gaming-Optimized.iso',
     [string]$WorkDirectory = 'C:\ISO_Build',
+    [ValidateSet('Minimal', 'Balanced')][string]$SizeProfile = 'Minimal',
+    [switch]$EnableLegacyGamingFeatures,
+    [string]$DriverDirectory,
     [string]$OscdimgPath,
     [string]$NetFx3Source,
     [string]$GSecurityIsoDirectory,
     [switch]$KeepWinRE,
+    [switch]$AllowAutomaticUpdates,
     [switch]$DisableAutomaticUpdates
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$disableUpdates = $DisableAutomaticUpdates -or -not $AllowAutomaticUpdates
 
 # ============================================================================
 # SELF-ELEVATION CHECK
@@ -116,7 +142,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     if ($PSBoundParameters.ContainsKey('ImageIndex')) { $argList += @('-ImageIndex', $ImageIndex) }
     if ($PSBoundParameters.ContainsKey('NetFx3Source')) { $argList += @('-NetFx3Source', "`"$NetFx3Source`"") }
     if ($PSBoundParameters.ContainsKey('GSecurityIsoDirectory')) { $argList += @('-GSecurityIsoDirectory', "`"$GSecurityIsoDirectory`"") }
+    if ($PSBoundParameters.ContainsKey('SizeProfile')) { $argList += @('-SizeProfile', $SizeProfile) }
+    if ($EnableLegacyGamingFeatures) { $argList += '-EnableLegacyGamingFeatures' }
+    if ($PSBoundParameters.ContainsKey('DriverDirectory')) { $argList += @('-DriverDirectory', "`"$DriverDirectory`"") }
     if ($KeepWinRE) { $argList += '-KeepWinRE' }
+    if ($AllowAutomaticUpdates) { $argList += '-AllowAutomaticUpdates' }
     if ($DisableAutomaticUpdates) { $argList += '-DisableAutomaticUpdates' }
     Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs
     exit
@@ -167,6 +197,55 @@ $ProfileData = @{
         'IIS-WebServerRole', 'MicrosoftWindowsPowerShellV2Root', 'TelnetClient', 'TFTP'
     )
 }
+
+# Explicit targets only: shared runtimes, identity, codecs, and drivers remain.
+if ($SizeProfile -eq 'Minimal') {
+    $ProfileData.RemoveApps += @(
+        'Microsoft.BingSearch', 'Microsoft.Windows.CrossDevice',
+        'Microsoft.OfficePushNotificationUtility', 'Microsoft.SkypeApp',
+        'Microsoft.MixedReality.Portal', 'Microsoft.MicrosoftStickyNotes',
+        'Microsoft.MSPaint', 'Microsoft.Microsoft3DViewer', 'Microsoft.Office.OneNote',
+        'Microsoft.WindowsCamera', 'Microsoft.WindowsNotepad',
+        'Microsoft.WindowsTerminal', 'Microsoft.ScreenSketch', 'Microsoft.Windows.Teams',
+        'Microsoft.Windows.Photos', 'Microsoft.WindowsCalculator',
+        'MicrosoftWindows.Client.WebExperience', 'Microsoft.Windows.Ai.Copilot.Provider',
+        'Microsoft.MicrosoftEdge.Stable'
+    )
+    $ProfileData.RemoveCapabilities += @(
+        'Microsoft.Windows.WordPad*', 'Microsoft.Windows.Wallpaper.Extended*',
+        'Hello.Face*'
+    )
+    $ProfileData.RemoveCapabilities += @('Microsoft.Windows.PowerShell.ISE*', 'WMIC*', 'Microsoft.Windows.Notepad*', 'Media.WindowsMediaPlayer*')
+    $ProfileData.RemoveFeatures += @(
+        'Recall', 'Internet-Explorer-Optional-amd64', 'HypervisorPlatform',
+        'VirtualMachinePlatform', 'Microsoft-Hyper-V-All',
+        'Microsoft-PrintToPDFServices-Features'
+    )
+}
+
+$MicroOptionalPackagePrefixes = @(
+    'Microsoft-Windows-PowerShell-ISE-FOD-Package~',
+    'Microsoft-Windows-Telnet-Client-FOD-Package~',
+    'Microsoft-Windows-TerminalServices-AppServer-Client-FOD-Package~',
+    'Microsoft-Windows-WMIC-FoD-Package~',
+    'Microsoft-Windows-Notepad-System-FoD-Package~',
+    'Microsoft-Windows-StepsRecorder-Package~',
+    'Microsoft-Windows-MediaPlayer-Package~',
+    'Microsoft-Windows-TFTP-Client-FOD-Package~',
+    'Microsoft-Windows-InternetExplorer-Optional-Package~',
+    'Microsoft-Windows-SmbDirect-FOD-Package~',
+    'Microsoft-Windows-TabletPCMath-Package~',
+    'Microsoft-Windows-DirectoryServices-ADAM-Client-FOD-Package~',
+    'Microsoft-Windows-EnterpriseClientSync-Host-FOD-Package~',
+    'Microsoft-Windows-SimpleTCP-FOD-Package~',
+    'OpenSSH-Client-Package~',
+    'Microsoft-Edge-WebView-FOD-Package~',
+    'Microsoft-Windows-ProjFS-OptionalFeature-FOD-Package~',
+    'Microsoft-Windows-WordPad-FoD-Package~',
+    'Microsoft-Windows-MSPaint-FoD-Package~',
+    'Microsoft-Windows-SnippingTool-FoD-Package~',
+    'Microsoft-Windows-Xps-Xps-Viewer-Opt-Package~'
+)
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -260,6 +339,100 @@ function Get-OscdimgExecutable([string]$ExplicitPath, [string]$TargetDirectory) 
     return $extractedExe
 }
 
+function Get-OfflineDriverInventory([string]$MountPath) {
+    $drivers = @(Get-WindowsDriver -Path $MountPath -All -ErrorAction Stop)
+    if ($drivers.Count -eq 0) { throw "No drivers returned for mounted image: $MountPath" }
+    foreach ($driver in $drivers) {
+        [pscustomobject]@{
+            Key = ("{0}|{1}|{2}" -f $driver.Driver, $driver.OriginalFileName, $driver.Version).ToLowerInvariant()
+            Inf = [IO.Path]::GetFileName($driver.OriginalFileName)
+            Provider = [string]$driver.ProviderName
+            Class = [string]$driver.ClassName
+            Version = [string]$driver.Version
+        }
+    }
+}
+
+function Assert-DriversPreserved([object[]]$Before, [object[]]$After, [string]$Label) {
+    $afterKeys = @{}
+    foreach ($driver in $After) { $afterKeys[$driver.Key] = $true }
+    $missing = @($Before | Where-Object { -not $afterKeys.ContainsKey($_.Key) })
+    if ($missing.Count -gt 0) {
+        throw "$Label lost source drivers during servicing: $($missing.Inf -join ', ')"
+    }
+}
+
+function Remove-OfflineBrowserPayload([string]$MountPath, [ValidateSet('Browser', 'MicroData')][string]$Group = 'Browser') {
+    if (-not (Test-Path -LiteralPath (Join-Path $MountPath 'Windows\System32\config\SYSTEM'))) {
+        throw 'Browser removal requires a mounted offline Windows image.'
+    }
+    $targets = @(
+        'Program Files (x86)\Microsoft\Edge',
+        'Program Files (x86)\Microsoft\EdgeCore',
+        'Program Files (x86)\Microsoft\EdgeUpdate',
+        'Program Files (x86)\Microsoft\EdgeWebView',
+        'Program Files\Microsoft\Edge',
+        'Program Files\Microsoft\EdgeCore',
+        'Program Files\Microsoft\EdgeUpdate',
+        'Program Files\Microsoft\EdgeWebView',
+        'Windows\System32\Microsoft-Edge-WebView',
+        'Windows\SysWOW64\Microsoft-Edge-WebView'
+    )
+    if ($Group -eq 'MicroData') {
+        $targets = @(
+            'Windows\Help', 'Windows\Web', 'Windows\Media',
+            'Windows\diagnostics', 'Windows\System32\OneDriveSetup.exe',
+            'Windows\SysWOW64\OneDriveSetup.exe'
+        )
+        $nativeCache = Join-Path $MountPath 'Windows\assembly'
+        if (Test-Path -LiteralPath $nativeCache) {
+            $targets += @(Get-ChildItem -LiteralPath $nativeCache -Directory -Filter 'NativeImages_*' |
+                ForEach-Object { 'Windows\assembly\' + $_.Name })
+        }
+    }
+    $removed = @()
+    foreach ($relative in $targets) {
+        $target = Join-Path $MountPath $relative
+        if (-not (Test-Path -LiteralPath $target)) { continue }
+        # Reject junctions before any recursive ownership change or deletion.
+        $probe = Get-Item -LiteralPath $target -Force
+        while ($probe.FullName -ne (Get-Item -LiteralPath $MountPath).FullName) {
+            if ($probe.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Offline removal path contains a reparse point: $relative"
+            }
+            if ($probe -is [IO.DirectoryInfo]) { $probe = $probe.Parent } else { $probe = $probe.Directory }
+        }
+        if (Get-ChildItem -LiteralPath $target -Recurse -Force |
+            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
+            throw "Offline removal payload contains reparse points: $relative"
+        }
+        Write-Step "Removing offline payload: $relative"
+        try {
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+        } catch [UnauthorizedAccessException] {
+            Invoke-Native 'takeown.exe' @('/F', $target, '/A', '/R', '/D', 'Y')
+            Invoke-Native 'icacls.exe' @($target, '/grant', '*S-1-5-32-544:(OI)(CI)F', '/T', '/C')
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+        }
+        $removed += $relative
+    }
+    return $removed
+}
+
+function Set-StagedImageWritable([string]$ImagePath) {
+    $image = Get-Item -LiteralPath $ImagePath -ErrorAction Stop
+    # Robocopy /COPY:DAT preserves the read-only attribute from ISO media.
+    $image.Attributes = $image.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+}
+
+function Test-AllowedOverlayPath([string]$RelativePath) {
+    $path = $RelativePath.Replace('\', '/').ToLowerInvariant()
+    if ($path -match '(^|/)install(?:\d+)?\.(wim|esd|swm)$') { return $false }
+    if ($path -match '^(boot/|efi/|bootmgr(?:\.efi)?$|setup\.exe$)') { return $false }
+    if ($path.StartsWith('sources/') -and -not $path.StartsWith('sources/$oem$/')) { return $false }
+    return $true
+}
+
 function Copy-IsoOverlayInternal([string]$SourceDirectory, [string]$MediaDirectory) {
     $source = (Resolve-Path -LiteralPath $SourceDirectory).Path.TrimEnd([IO.Path]::DirectorySeparatorChar)
     $target = [IO.Path]::GetFullPath($MediaDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar)
@@ -272,6 +445,12 @@ function Copy-IsoOverlayInternal([string]$SourceDirectory, [string]$MediaDirecto
         throw 'ISO overlays must not contain symbolic links or reparse points.'
     }
     $files = @($items | Where-Object { !$_.PSIsContainer } | Sort-Object FullName)
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($source.Length + 1).Replace('\', '/')
+        if (-not (Test-AllowedOverlayPath $relative)) {
+            throw "Overlay cannot replace setup/boot files or installation images: $relative. Only sources/`$OEM`$ payloads are allowed under sources."
+        }
+    }
     $manifest = @()
     foreach ($file in $files) {
         $relative = $file.FullName.Substring($source.Length + 1)
@@ -306,6 +485,14 @@ function Invoke-RegUnload([string]$HiveKey, [int]$MaxRetries = 15) {
 # ============================================================================
 Write-Header "GDEBLOAT - WINDOWS 11/10 OPTIMIZED GAMING ISO CREATOR by Gorstak"
 Write-Info "Checking system environment and tools..."
+
+Write-Info "Size profile: $SizeProfile. Working WIM size is temporary; final media uses recovery-compressed install.esd."
+if ($DriverDirectory) {
+    $DriverDirectory = (Resolve-Path -LiteralPath $DriverDirectory -ErrorAction Stop).Path
+    if (-not (Get-ChildItem -LiteralPath $DriverDirectory -Filter '*.inf' -Recurse -File)) {
+        throw 'DriverDirectory must contain extracted INF driver packages.'
+    }
+}
 
 # Auto-detect default GSecurity candidate if not specified
 if (!$GSecurityIsoDirectory) {
@@ -602,6 +789,12 @@ try {
         '/CheckIntegrity'
     )
     $mountedInstallImage = $true
+    $sourceInstallDrivers = @(Get-OfflineDriverInventory $mount)
+
+    if ($DriverDirectory) {
+        Write-Step 'Adding supplied signed drivers to the installed OS image...'
+        Invoke-Dism @("/Image:$mount", '/Add-Driver', "/Driver:$DriverDirectory", '/Recurse')
+    }
 
     $netfxState = [string](Get-WindowsOptionalFeature -Path $mount -FeatureName NetFx3).State
 
@@ -610,7 +803,8 @@ try {
     # ========================================================================
     Write-Header "STAGE 3: ENABLING OFFLINE .NET 3.5 AND DIRECTPLAY"
 
-    if ($NetFx3Source -and (Test-Path -LiteralPath $NetFx3Source)) {
+    $enableLegacy = $EnableLegacyGamingFeatures -or $SizeProfile -eq 'Balanced'
+    if ($enableLegacy -and $NetFx3Source -and (Test-Path -LiteralPath $NetFx3Source)) {
         Write-Step "Injecting .NET Framework 3.5 (NetFx3)..."
         Invoke-Dism @(
             "/Image:$mount",
@@ -626,11 +820,15 @@ try {
             throw "NetFx3 failed to enable: $netfxState"
         }
     } else {
-        Write-Warning "Skipping NetFx3 installation: source not available."
+        if ($enableLegacy) {
+            Write-Warning 'Skipping NetFx3 installation: source not available.'
+        } else {
+            Write-Info 'Not adding NetFx3 or DirectPlay in Minimal mode. Use -EnableLegacyGamingFeatures for older games.'
+        }
     }
 
     $allFeatures = @(Get-WindowsOptionalFeature -Path $mount)
-    if ($allFeatures.FeatureName -contains 'DirectPlay') {
+    if ($enableLegacy -and $allFeatures.FeatureName -contains 'DirectPlay') {
         Write-Step "Enabling DirectPlay legacy gaming feature..."
         Invoke-Dism @(
             "/Image:$mount",
@@ -679,12 +877,30 @@ try {
         }
     }
     Write-Step "Removed $removedAppCount unwanted provisioned packages."
+    $remainingApps = @(Get-AppxProvisionedPackage -Path $mount)
+    foreach ($protected in @($provisionedApps | Where-Object { Test-KeptApp $_.DisplayName })) {
+        if ($protected.PackageName -notin @($remainingApps | ForEach-Object { $_.PackageName })) {
+            throw "Protected package missing after servicing: $($protected.PackageName)"
+        }
+    }
+    $storeApp = @($remainingApps | Where-Object { $_.DisplayName -eq 'Microsoft.WindowsStore' })
+    $xboxApp = @($remainingApps | Where-Object { $_.DisplayName -like 'Microsoft.GamingApp*' -or $_.DisplayName -like 'Microsoft.Xbox*' })
+
+    $removedBrowserPaths = @()
+    if ($SizeProfile -eq 'Minimal') {
+        Write-Warning 'Minimal mode removes Edge and WebView2. Xbox/Microsoft sign-in or other web-based application screens may fail.'
+        $removedBrowserPaths = @(Remove-OfflineBrowserPayload $mount)
+    }
+
+
 
     # ========================================================================
     # REMOVING BLOATED CAPABILITIES & FEATURES
     # ========================================================================
     Write-Header "STAGE 5: PRUNING OPTIONAL CAPABILITIES & FEATURES"
 
+    $microPackageResults = @()
+    $removedMicroDataPaths = @()
     $capabilities = @(Get-WindowsCapability -Path $mount)
     $removedCapCount = 0
     $capabilityRemovalFailures = @()
@@ -695,7 +911,7 @@ try {
                 if ($cap.Name -like $pattern) { $match = $true; break }
             }
             # Never remove NetFx3, VBScript, WMI, PowerShell ISE
-            if ($cap.Name -like '*NetFX3*' -or $cap.Name -like '*VBSCRIPT*' -or $cap.Name -like '*WMIC*') {
+            if ($cap.Name -like '*NetFX3*' -or $cap.Name -like '*VBSCRIPT*' -or ($SizeProfile -eq 'Balanced' -and $cap.Name -like '*WMIC*')) {
                 $match = $false
             }
             if ($match) {
@@ -736,10 +952,38 @@ try {
 
     $features = @(Get-WindowsOptionalFeature -Path $mount)
     foreach ($feat in $features) {
-        if ($ProfileData.RemoveFeatures -contains $feat.FeatureName -and $feat.State -eq 'Enabled') {
+        if ($ProfileData.RemoveFeatures -contains $feat.FeatureName -and
+            ($feat.State -eq 'Enabled' -or ($SizeProfile -eq 'Minimal' -and $feat.State -eq 'Disabled'))) {
             Write-Step "Disabling feature: $($feat.FeatureName)"
             Invoke-Dism @("/Image:$mount", '/Disable-Feature', "/FeatureName:$($feat.FeatureName)", '/Remove', '/NoRestart')
         }
+    }
+
+    if ($SizeProfile -eq 'Minimal') {
+        $packages = @(Get-WindowsPackage -Path $mount -ErrorAction Stop)
+        foreach ($package in $packages) {
+            if ([string]$package.PackageState -notin @('Installed', 'Staged')) { continue }
+            $packageName = [string]$package.PackageName
+            $selected = $false
+            foreach ($prefix in $MicroOptionalPackagePrefixes) {
+                if ($packageName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    $selected = $true
+                    break
+                }
+            }
+            if (-not $selected) { continue }
+            Write-Step "Removing Micro optional package: $packageName"
+            try {
+                Invoke-Dism @("/Image:$mount", '/Remove-Package', "/PackageName:$packageName", '/NoRestart')
+                $microPackageResults += [pscustomobject]@{ Name = $packageName; Outcome = 'Removed'; ExitCode = 0 }
+            } catch {
+                $exitCode = $_.Exception.Data['ExitCode']
+                if ($exitCode -notin @(-2146498523, -2146498555, -2147019007)) { throw }
+                Write-Warning "Optional package retained after DISM removal failed ($exitCode): $packageName"
+                $microPackageResults += [pscustomobject]@{ Name = $packageName; Outcome = 'Retained'; ExitCode = $exitCode }
+            }
+        }
+        $removedMicroDataPaths = @(Remove-OfflineBrowserPayload $mount -Group MicroData)
     }
 
     # ========================================================================
@@ -793,6 +1037,7 @@ try {
         Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\AppXSvc", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
         Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\ClipSVC", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
         Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\BITS", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\wuauserv", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
         Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\InstallService", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
         Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\XblAuthManager", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
         Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\XblGameSave", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
@@ -825,9 +1070,11 @@ try {
         Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\CloudContent", '/v', 'DisableWindowsConsumerFeatures', '/t', 'REG_DWORD', '/d', '1', '/f')
 
         # 7. UPDATE POLICY (IF REQUESTED):
-        if ($DisableAutomaticUpdates) {
+        if ($disableUpdates) {
             Write-Step "Disabling automatic Windows Update..."
             Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU", '/v', 'NoAutoUpdate', '/t', 'REG_DWORD', '/d', '1', '/f')
+        } else {
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU", '/v', 'NoAutoUpdate', '/t', 'REG_DWORD', '/d', '0', '/f')
         }
 
         # 8. DEFAULT USER / NEW ACCOUNTS TWEAKS:
@@ -926,6 +1173,35 @@ try {
         Write-Utf8 $answerPath $autounattendXml
     }
 
+    # Keep browser restoration instructions with the installed OS. No browser
+    # installation-blocking policies or Windows Installer removals are applied.
+    $restoreBrowsersText = @'
+GDebloat: restoring Edge and WebView2
+
+Minimal mode removed browser payloads to reduce size. Windows Installer, core
+servicing, Store/Xbox packages and shared AppX frameworks were retained.
+
+1. Download the full Microsoft Edge installer for Windows x64 from Microsoft:
+   https://www.microsoft.com/edge/business/download
+   Install it as Administrator. For the Enterprise MSI, an unattended install is:
+   msiexec.exe /i "MicrosoftEdgeEnterpriseX64.msi" /qn /norestart
+
+2. Download the WebView2 Evergreen Standalone Installer (x64) from Microsoft:
+   https://developer.microsoft.com/microsoft-edge/webview2/
+   Use the full standalone runtime, not just the SDK or the small bootstrapper.
+   Install as Administrator. An unattended install is:
+   MicrosoftEdgeWebView2RuntimeInstallerX64.exe /silent /install
+
+Use official signed installers; Microsoft Edge and WebView2 Runtime are separate
+products, so install both when needed. Reboot, then test Xbox/Microsoft sign-in.
+Core Windows update components are retained, but automatic OS updates are disabled
+by default. This policy does not block manually installing these browser products.
+Browser restoration and Xbox functionality require validation on the installed OS.
+'@
+    $restoreNotesPath = Join-Path $mount 'Windows\Setup\Scripts\GDebloat-RestoreBrowsers.txt'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $restoreNotesPath) -Force | Out-Null
+    Write-Utf8 $restoreNotesPath $restoreBrowsersText
+
     # Cache answer file in Panther for setup consistency
     $pantherDir = Join-Path $mount 'Windows\Panther'
     New-Item -ItemType Directory -Path $pantherDir -Force | Out-Null
@@ -948,9 +1224,41 @@ try {
         $componentCleanupSkipReason = 'Pending servicing operations (0x800f0806)'
         Write-Warning "Component cleanup skipped: $componentCleanupSkipReason. The image may be larger; pending actions are retained for first boot."
     }
-    Invoke-Dism @("/Image:$mount", '/Cleanup-Image', '/ScanHealth')
+    $imageHealth = Repair-WindowsImage -Path $mount -ScanHealth -ErrorAction Stop
+    if ([string]$imageHealth.ImageHealthState -ne 'Healthy') {
+        throw "Image health check did not report Healthy: $($imageHealth.ImageHealthState). Use intact source media or repair servicing before rebuilding."
+    }
+
+    if (-not $componentCleanupCompleted) {
+        $cleanupScript = @'
+# Run in elevated Windows PowerShell after setup finishes and Windows has rebooted.
+# /ResetBase is irreversible: superseded updates cannot subsequently be uninstalled.
+# This uses servicing metadata to remove superseded components and retains shared dependencies.
+# It never deletes WinSxS directories or reverts pending setup actions.
+#requires -RunAsAdministrator
+$ErrorActionPreference = 'Stop'
+& "$env:SystemRoot\System32\dism.exe" /Online /Cleanup-Image /StartComponentCleanup /ResetBase
+$cleanupExit = $LASTEXITCODE
+if ($cleanupExit -notin @(0, 3010)) {
+    throw "Component cleanup failed ($cleanupExit). If servicing is pending, reboot and retry."
+}
+Write-Host 'Component cleanup finished. This reduces installed disk usage; it does not shrink the original installation ISO.'
+'@
+        $cleanupPath = Join-Path $mount 'Windows\Setup\Scripts\GDebloat-ComponentCleanup.ps1'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $cleanupPath) -Force | Out-Null
+        Write-Utf8 $cleanupPath $cleanupScript
+    }
 
     $winrePresent = Test-Path -LiteralPath $winrePath
+    $finalInstallDrivers = @(Get-OfflineDriverInventory $mount)
+    Assert-DriversPreserved $sourceInstallDrivers $finalInstallDrivers 'Install image'
+    $intelRealtekNetworkDrivers = @($finalInstallDrivers | Where-Object {
+        $_.Class -eq 'Net' -and $_.Provider -match 'Intel|Realtek'
+    })
+    if ($intelRealtekNetworkDrivers.Count -eq 0) {
+        Write-Warning 'Source/supplied media contain no detected Intel or Realtek Net-class packages. Supply matching OEM Ethernet drivers with -DriverDirectory.'
+    }
+    Write-Step "Source install drivers retained: $($sourceInstallDrivers.Count); Intel/Realtek network packages present: $($intelRealtekNetworkDrivers.Count)."
     Write-Step "Committing and unmounting Windows image..."
     Invoke-Dism @('/Unmount-Image', "/MountDir:$mount", '/Commit', '/CheckIntegrity')
     $mountedInstallImage = $false
@@ -971,6 +1279,23 @@ try {
         '/CheckIntegrity'
     )
 
+    $exportedImages = @(Get-WindowsImage -ImagePath $destEsd -ErrorAction Stop)
+    if ($exportedImages.Count -ne 1 -or $exportedImages[0].ImageIndex -ne 1) {
+        throw 'Final install.esd must contain exactly one image at index 1.'
+    }
+    $installImageBytes = (Get-Item -LiteralPath $destEsd).Length
+    $installImageHash = (Get-FileHash -LiteralPath $destEsd -Algorithm SHA256).Hash
+    Write-Step ("Final install.esd: {0:N3} GiB (working WIM is temporary)." -f ($installImageBytes / 1GB))
+    if ($installImageBytes -gt 1000000000) {
+        Write-Info 'The final install image exceeds the 1 GB target. Core servicing, drivers, audio, and protected Store/Xbox packages were retained. Browser removal can still affect sign-in.'
+    }
+    if ($installImageBytes -ge 4GB) {
+        Write-Warning 'install.esd exceeds the FAT32 single-file limit. Use Rufus with NTFS/UEFI:NTFS; do not manually copy this image to FAT32.'
+    }
+    $unexpectedImages = @(Get-ChildItem -LiteralPath (Join-Path $media 'sources') -File |
+        Where-Object { $_.Name -match '^install.*\.(wim|swm)$' })
+    if ($unexpectedImages.Count -gt 0) { throw 'Unexpected install WIM/SWM files in final media.' }
+
     # Clean working WIM
     Remove-Item -LiteralPath $tempWim -Force -ErrorAction SilentlyContinue
 
@@ -985,54 +1310,59 @@ try {
     # BOOT.WIM CONFIGURATION (SOLVING "MISSING DRIVER" ERROR)
     # ========================================================================
     Write-Header "STAGE 11: OPTIMIZING BOOT.WIM WITHOUT DRIVER LOSS"
-    <#
-    CRITICAL ANALYSIS: Why did previous debloaters cause "missing driver" errors?
-    1. Micro 11 Barebones deleted boot.wim Index 1, and manually stripped
-       dismapi.dll, imagingprovider.dll, wimprovider.dll, vhdprovider.dll, and DriverStore files.
-    2. Result: WinPE could not load NVMe, AHCI, or USB 3.x storage drivers to read the installation media,
-       causing setup.exe to throw: "A media driver your computer needs is missing"!
-    OUR SOLUTION:
-    - Retain ALL inbox drivers, DriverStore, and WinSxS in boot.wim.
-    - Mount boot.wim Index 2 (Microsoft Windows Setup).
-    - Load its SYSTEM hive and set LabConfig bypasses (TPM, CPU, RAM, SecureBoot).
-    - Unload registry hive cleanly and commit boot.wim.
-    - Result: 100% driver compatibility + 100% hardware bypass! Zero missing driver errors.
-    #>
+    # Keep every source boot image and its complete setup/driver payload.
+    # This preserves source compatibility; OEM storage drivers may still be needed.
     $bootWimPath = Join-Path $media 'sources\boot.wim'
+    Set-StagedImageWritable $bootWimPath
     $bootImages = @(Get-WindowsImage -ImagePath $bootWimPath)
+    if ($bootImages.Count -eq 0) { throw 'boot.wim contains no boot images.' }
     Write-Step "Inspecting boot.wim: found $($bootImages.Count) images."
 
     # Index 2 is the Setup image; if only 1 index exists, use index 1
     $bootSetupIndex = if ($bootImages.Count -ge 2) { 2 } else { 1 }
 
-    Write-Step "Mounting boot.wim (Index $($bootSetupIndex): $($bootImages[$bootSetupIndex - 1].ImageName))..."
-    Invoke-Dism @('/Mount-Image', "/ImageFile:$bootWimPath", "/Index:$bootSetupIndex", "/MountDir:$bootMount")
-    $mountedBootImage = $true
+    $verifiedBootDriverIndexes = @()
+    foreach ($bootImage in $bootImages) {
+        $bootIndex = [int]$bootImage.ImageIndex
+        if (-not $DriverDirectory -and $bootIndex -ne $bootSetupIndex) { continue }
+        Write-Step "Mounting boot.wim (Index $($bootIndex): $($bootImage.ImageName))..."
+        Invoke-Dism @('/Mount-Image', "/ImageFile:$bootWimPath", "/Index:$bootIndex", "/MountDir:$bootMount")
+        $mountedBootImage = $true
+        $sourceBootDrivers = @(Get-OfflineDriverInventory $bootMount)
 
-    $bootSystemHive = Join-Path $bootMount 'Windows\System32\config\SYSTEM'
-    if (Test-Path -LiteralPath $bootSystemHive) {
-        Write-Step "Injecting LabConfig hardware bypasses into boot.wim..."
-        $bLoaded = $false
-        try {
-            Invoke-Native 'reg.exe' @('load', 'HKLM\TK_BOOTSYSTEM', $bootSystemHive)
-            $bLoaded = ($LASTEXITCODE -eq 0)
-
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassTPMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassCPUCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassRAMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassSecureBootCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassStorageCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassDiskCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\MoSetup", '/v', 'AllowUpgradesWithUnsupportedTPMOrCPU', '/t', 'REG_DWORD', '/d', '1', '/f')
-            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\ControlSet001\Control\BitLocker", '/v', 'PreventDeviceEncryption', '/t', 'REG_DWORD', '/d', '1', '/f')
-        } finally {
-            if ($bLoaded) { Invoke-RegUnload 'TK_BOOTSYSTEM' }
+        if ($DriverDirectory) {
+            Invoke-Dism @("/Image:$bootMount", '/Add-Driver', "/Driver:$DriverDirectory", '/Recurse')
         }
-    }
 
-    Write-Step "Committing updated boot.wim..."
-    Invoke-Dism @('/Unmount-Image', "/MountDir:$bootMount", '/Commit', '/CheckIntegrity')
-    $mountedBootImage = $false
+        $bootSystemHive = Join-Path $bootMount 'Windows\System32\config\SYSTEM'
+        if ($bootIndex -eq $bootSetupIndex -and (Test-Path -LiteralPath $bootSystemHive)) {
+            Write-Step "Injecting LabConfig hardware bypasses into boot.wim..."
+            $bLoaded = $false
+            try {
+                Invoke-Native 'reg.exe' @('load', 'HKLM\TK_BOOTSYSTEM', $bootSystemHive)
+                $bLoaded = ($LASTEXITCODE -eq 0)
+
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassTPMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassCPUCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassRAMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassSecureBootCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassStorageCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassDiskCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\MoSetup", '/v', 'AllowUpgradesWithUnsupportedTPMOrCPU', '/t', 'REG_DWORD', '/d', '1', '/f')
+                Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\ControlSet001\Control\BitLocker", '/v', 'PreventDeviceEncryption', '/t', 'REG_DWORD', '/d', '1', '/f')
+            } finally {
+                if ($bLoaded) { Invoke-RegUnload 'TK_BOOTSYSTEM' }
+            }
+        }
+
+        $finalBootDrivers = @(Get-OfflineDriverInventory $bootMount)
+        Assert-DriversPreserved $sourceBootDrivers $finalBootDrivers "Boot image index $bootIndex"
+        $verifiedBootDriverIndexes += $bootIndex
+        Write-Step "Committing updated boot.wim..."
+        Invoke-Dism @('/Unmount-Image', "/MountDir:$bootMount", '/Commit', '/CheckIntegrity')
+        $mountedBootImage = $false
+
+    }
 
     # ========================================================================
     # ISO MASTERING (DUAL BIOS + UEFI BOOTABLE ISO)
@@ -1081,6 +1411,27 @@ try {
         SHA256 = $isoHash
         SelectedEdition = $selectedImage.ImageName
         SourceVersion = [string]$selectedImage.Version
+        SizeProfile = $SizeProfile
+        InstallImageFormat = 'ESD (recovery compression)'
+        InstallImageSizeBytes = $installImageBytes
+        InstallImageSHA256 = $installImageHash
+        InstallImageTargetBytes = 1000000000
+        InstallImageTargetMet = ($installImageBytes -le 1000000000)
+        AdditionalDriverDirectory = $DriverDirectory
+        SourceInstallDriverCount = $sourceInstallDrivers.Count
+        FinalInstallDriverCount = $finalInstallDrivers.Count
+        SourceInstallDriversPreserved = $true
+        IntelRealtekNetworkDrivers = @($intelRealtekNetworkDrivers)
+        DriverCheckedBootIndexes = @($verifiedBootDriverIndexes)
+        ProtectedPackagesPreserved = $true
+        RemovedBrowserPaths = @($removedBrowserPaths)
+        MicroOptionalPackageResults = @($microPackageResults)
+        RemovedMicroDataPaths = @($removedMicroDataPaths)
+        BrowserRemovalRequested = ($SizeProfile -eq 'Minimal')
+        BrowserRestoreInstructions = '%SystemRoot%\Setup\Scripts\GDebloat-RestoreBrowsers.txt'
+        XboxSignInTested = $false
+        ImageHealthState = [string]$imageHealth.ImageHealthState
+        AutomaticWindowsUpdatesDisabled = [bool]$disableUpdates
         NetFx3Installed = [bool]($netfxState -in @('Enabled', 'EnablePending'))
         MicrosoftStorePresent = [bool]$storeApp
         XboxPackagesPresent = [bool]$xboxApp
@@ -1091,6 +1442,7 @@ try {
         ReservedStorageDisabled = $true
         ComponentCleanupCompleted = $componentCleanupCompleted
         ComponentCleanupSkipReason = $componentCleanupSkipReason
+        PostInstallCleanupScript = $(if (-not $componentCleanupCompleted) { '%SystemRoot%\Setup\Scripts\GDebloat-ComponentCleanup.ps1' } else { $null })
         RemovedAppsCount = $removedAppCount
         RemovedCapabilitiesCount = $removedCapCount
         CapabilityRemovalFailures = @($capabilityRemovalFailures)
@@ -1104,12 +1456,16 @@ try {
     Write-Host ("  ISO Created  : {0}" -f $OutputIso) -ForegroundColor Green
     Write-Host ("  File Size    : {0:N3} GB ({1:N3} GiB)" -f ($isoBytes / 1e9), ($isoBytes / 1GB)) -ForegroundColor Green
     Write-Host ("  SHA256       : {0}" -f $isoHash) -ForegroundColor White
+    Write-Host ("  Install ESD  : {0:N3} GiB" -f ($installImageBytes / 1GB)) -ForegroundColor White
     Write-Host ("  Report       : {0}" -f $reportPath) -ForegroundColor Gray
     Write-Host ""
     if ($capabilityRemovalFailures.Count -gt 0) {
         Write-Warning "$($capabilityRemovalFailures.Count) optional capability removal(s) failed. See CapabilityRemovalFailures in the report."
     }
     Write-Host "Offline build completed. See the report for observed package and feature states." -ForegroundColor Cyan
+    if (-not $componentCleanupCompleted) {
+        Write-Host 'After setup and a reboot, run Windows\Setup\Scripts\GDebloat-ComponentCleanup.ps1 as Administrator to finish WinSxS cleanup.' -ForegroundColor Yellow
+    }
     Write-Host "Boot, setup, Store, Xbox, and audio functionality require testing in a Windows VM." -ForegroundColor Yellow
 } finally {
     Write-Info "Cleaning up mount points and resources..."
