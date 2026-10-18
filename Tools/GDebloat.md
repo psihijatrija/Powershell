@@ -1,53 +1,56 @@
-# GDebloat: adapted Micro 11 Barebones
+# GDebloat — Micro 11 Barebones renamed and edited
 
-This version replaces the previous GDebloat removal pipeline with the **complete install-image file and package lists from the uploaded `TrimKit/Micro 11 Barebones.ps1`**: 7,777 file targets and 72 package patterns. It uses Micro's bulk `takeown`/`icacls` ownership pass and direct file deletion, with explicit exceptions for drivers, audio, Store/Xbox packages, shared runtimes, and installation infrastructure. The former per-file reparse-tag blocker is gone, so ordinary WIM/SIS-backed files are not rejected as unknown links.
+This is now the **actual uploaded Micro script**, edited in place, rather than the previous rewritten GDebloat pipeline. The original ownership, bulk deletion, package removal, WinSxS whitelist/copy/delete, hive-helper definitions, WIM rebuild, ESD compression and ISO mastering code remains wherever it does not conflict with the exclusions below.
 
-The uploaded Micro source SHA-256 is `46254253E4B18470221DFF828C7F1F5BBB0B4339C3369571AD7F4BBA9D22F20B`. This is an adapted builder, not a byte-for-byte copy: its destructive boot/setup and blind registry-deletion stages are intentionally excluded. No claim is made that Windows functionality has been verified or that it reaches Micro's original size.
+The source was `TrimKit/Micro 11 Barebones.ps1`, SHA-256 `46254253E4B18470221DFF828C7F1F5BBB0B4339C3369571AD7F4BBA9D22F20B`. Its original install/boot deletion arrays and package-pattern list remain; exceptions are applied after those lists. Install file targets include 7,777 literal entries and one computed Help path. No new per-file reparse, hardlink, driver-inventory or image-health gates are added to the build.
+
+## Changes to Micro
+
+- Renamed its branding and staging folder to **GDebloat**.
+- Embedded **oscdimg.exe**. It extracts locally and verifies SHA-256 `F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD`; it does not download the tool. `-OscdimgPath` can select an existing executable.
+- Excluded Ethernet/Wi-Fi driver packages and driver/INF paths from the main deletion lists. Intel/Realtek Ethernet drivers already present in the source are retained. Micro's separate install-image printer/scanner/smartcard/tape-driver pruning remains.
+- Added keep prefixes for Store, Xbox/Gaming, shared AppX runtimes and media codecs. Added audio, installer, .NET, core shell and sign-in exceptions to the file lists. AppX residual-folder removal uses only successfully removed packages.
+- Retained **Micro's WinSxS copy/delete method**, expanded with driver/audio/Store/Xbox/runtime/installer keep patterns. Manifests/catalogs and root metadata files are retained. This is still an aggressive whitelist, not a verified dependency closure.
+- Kept Micro's boot-image and setup-media debloat enabled by default. Boot driver, hive/profile, setup engine/provider and relevant resource paths are excluded. Every boot index is retained; Micro's index-1 deletion is removed and the final rebuild exports all indexes. The normal Microsoft Setup image remains the bootable image.
+- Removed execution-policy changes, install policy/tweak stages, and offline registry mutation/cleanup/compaction stages. Boot hives are not loaded, edited, compacted or cleaned. Unused original registry helper definitions remain. No fake WSUS, UAC, pagefile, CPU-mitigation, or other policy tweaks are applied. Micro's update-file removal remains; automatic updates are not separately disabled by a new policy.
+- Removed the empty WinRE placeholder. Edge, WebView2 and recovery removals remain.
+- Isolated Micro's work under a fresh child of `-WorkDirectory`; existing parent-directory contents are not cleared. Added optional source-drive/index/output parameters and removed the completion prompt. Existing output files are not overwritten.
 
 ## Run
 
-Use elevated **64-bit Windows PowerShell**, intact x64 Windows installation media, and an NTFS staging volume with at least 20 GB free. The script prompts for the source and edition if omitted. It uses a fresh work subdirectory and never clears the supplied parent directory.
+Use elevated **64-bit Windows PowerShell** on Windows. The source parameter follows Micro's original workflow: **mounted media drive**, not an ISO-file path. Mount the ISO first. Supply an image index that exists in that media, or omit it to use Micro's selection menu.
 
 ```powershell
 .\GDebloat.ps1 -SourceIso 'F:\' -ImageIndex 1 `
-  -OutputIso 'E:\Test\GDebloat-Micro.iso' -WorkDirectory 'C:\ISO_Build'
+  -OutputIso 'E:\Test\GDebloat.iso' -WorkDirectory 'C:\ISO_Build'
 ```
 
-`SourceIso` also accepts a mounted media folder or ISO path. Choose an edition present in your source. An existing output ISO is never overwritten; choose another filename or remove the old output yourself. `-SizeProfile Minimal` is accepted for compatibility. The old Balanced profile, GSecurity overlays, and legacy feature-injection options are not part of this replacement.
+Running `.\GDebloat.ps1` prompts for the drive and edition. The old `SizeProfile` option is not part of this literal Micro adaptation. Driver and GSecurity inclusion are automatic as described below. The output defaults to `GDebloat.iso` beside the script. Logs remain in the isolated work folder.
 
-**Oscdimg is embedded** in the single script. It extracts into the isolated work directory and verifies SHA-256 `F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD` before use. An explicit `-OscdimgPath`, local executable, or installed ADK executable can still be selected. No runtime download is required.
+Use the source media or the auto-detected `Drivers` folder for the hardware drivers you need. Preserving drivers does not add Intel VMD/RST, RAID or Ethernet drivers absent from the source. Boot and install the original media on the same hardware when diagnosing a media-driver message.
 
-## What differs from Micro
+## Automatic additions — no extra prompts
 
-- **Boot/setup:** Micro's boot-index deletion, boot driver/file removal, boot WinSxS pruning, and setup-media file cleanup are omitted. The source `boot.wim` is copied and checked for byte equality. Without optional driver injection it remains unchanged. This preserves source compatibility; it cannot supply drivers absent from the source.
-- **Drivers:** install-image DriverStore, INF files, and driver binaries are protected. Intel/Realtek Ethernet and Wi-Fi FOD packages are excluded from Micro's package-removal patterns. Source driver inventories are compared before and after removals; loss of a source driver stops export. The report lists detected Intel/Realtek Net-class packages, including Ethernet and potentially Wi-Fi. That list is not a hardware compatibility test.
-- **Audio/Store/Xbox:** audio services/binaries, Store/Xbox provisioned packages, codecs, shared AppX frameworks, .NET runtimes, installer files, and core shell/identity dependencies have protected exceptions. All other provisioned applications are candidates for removal, as in Micro. Broad registry garbage-collection and service-registration deletion are excluded. Preservation is intended to support these features but does not establish that they work.
-- **WinSxS:** direct payload trimming replaces Micro's near-empty component-store whitelist. Component directories are retained if they contain files with multiple hardlinks, match protected runtime/device families, or have unknown link state. Other component payload directories can be deleted. Metadata directories and root files, including pending operations, remain. This ties trimming to what remains installed but is **not a complete dependency-graph analysis**. It can still leave CBS servicing inconsistent. Native link counts are queried in-process rather than launching `fsutil` for every file.
-- **Updates:** automatic OS updates are disabled by policy; the servicing/delivery backend is retained for Store/Xbox. Micro's fake WSUS server and disabling of `wuauserv` are omitted. Manual OS updates are not guaranteed to be blocked.
-- **Edge/WebView2/WinRE:** removed. No empty recovery-WIM placeholder is created. Browser restoration instructions are included at `%SystemRoot%\Setup\Scripts\GDebloat-RestoreBrowsers.txt`. Windows Installer/framework files are protected so later installation can be attempted with Microsoft's full Edge installer and WebView2 Evergreen Standalone Runtime. Restoration and Xbox sign-in still require testing on the finished image.
-- **Failures:** optional app/package/file removals are reported as retained or partial instead of falsely counted as successes. Mounting, image export, driver loss, protected AppX loss, and ISO creation remain fatal. Failed builds retain the transcript and work directory.
+Only Micro's source-drive and edition-selection questions are shown. These additions run automatically:
 
-The script does not inherit unrelated Micro changes that disable UAC, the pagefile, or CPU security mitigations. It does not guarantee Windows Update/servicing support after manual component stripping, or that missing dependencies can be restored without original media/rebuilding.
+- **Drivers:** when `Drivers` exists beside `GDebloat.ps1`, recursively add its signed INF packages to the installation image and every original boot image. Use extracted driver packages, not installer EXEs. `-DriverDirectory` overrides the location; `-SkipAutoDrivers` disables injection. DISM signature enforcement remains enabled.
+- **GSecurity:** when `GSecurity` exists beside the script, use `GSecurity\Iso` if present, otherwise the folder itself as an overlay. Its root payload/answer-file content and `sources\$OEM$` content are copied into the final media; boot/EFI trees and source setup images/providers cannot be replaced. Copying files does not independently execute GSecurity scripts; its OEM/answer-file payload determines installed behavior. `-GSecurityDirectory` overrides the location; `-SkipGSecurity` disables inclusion.
+- **.NET Framework 3.5 and DirectPlay:** enabled before Micro's removal stages and included in the keep exceptions. NetFx3 sources are discovered on the mounted media under `sources\sxs`, then beside the script under `NetFx3` or `sources\sxs`. `-NetFx3Source` can select another matching CAB directory. If NetFx3 is already enabled, source CABs are unnecessary. Otherwise, missing or mismatched CABs stop the build with a clear error, without asking another question. DirectPlay uses the source image's payload.
 
-## OEM drivers and USB
+Enabling Windows features and injecting drivers naturally updates their offline registrations through DISM. This is separate from the removed Micro registry policy/cleanup stages. Feature/driver injection failures stop the build; the script does not silently omit requested features.
 
-If the source lacks your hardware's driver, supply the extracted **signed INF packages**:
+## Size and later browser installation
 
-```powershell
-.\GDebloat.ps1 -SourceIso 'F:\' -ImageIndex 1 `
-  -OutputIso 'E:\Test\GDebloat-Micro.iso' -DriverDirectory 'E:\Drivers'
-```
+Micro's final output uses a single-edition, recovery-compressed **install.esd**. Its intermediate WIM is temporary. One GB remains a target, not a verified result. Protecting required dependencies increases the image compared with unmodified Micro.
 
-This adds the supplied drivers to the installed OS image and every original boot image, preserving original driver inventories. Unsigned-driver enforcement is not bypassed. Drivers must match the target hardware; random driver bundles are unnecessary.
+For later browser installation, use Microsoft's full x64 [Edge installer](https://www.microsoft.com/edge/business/download) and [WebView2 Evergreen Standalone Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Shared runtimes, installer files and related metadata have keep exceptions. Actual reinstallation, Store downloads, Xbox sign-in/game launch and audio have **not** been validated on a completed image. Aggressive Micro stripping can still break dependencies and servicing; preservation patterns do not guarantee restoration.
 
-Use Rufus to create the USB and check its completion status. An `install.esd` at or above 4 GiB cannot be copied directly to FAT32; use NTFS/UEFI:NTFS. Test disk detection and installation on the target hardware. If a media-driver error appears, compare with the original ISO on the same USB and hardware.
+Use Rufus to create the USB. If the final ESD exceeds FAT32's single-file limit, use NTFS/UEFI:NTFS.
 
-## Size and validation
-
-The large working WIM is temporary. Final media contains **one recovery-compressed `sources\install.esd`**, not that working WIM. The report records final ESD/ISO sizes and SHA-256 values, the number of eligible Micro targets, component removals, and individual removal outcomes. **One GB is a target, not a verified or guaranteed result.** Retained drivers, active components, runtimes, and installer metadata impose a size cost.
+## Checks
 
 ```powershell
 pwsh -NoProfile -File .\tests\GDebloat.Tests.ps1
 ```
 
-Checks cover parsing, the complete Micro target lists, protection filters, metadata-helper compilation, simulated live/retired component trimming, disposable-file removal, driver-loss detection, native errors, and the embedded executable checksum. Native hardlink queries and image servicing require Windows and are not validated by these Linux checks. Boot the finished USB and test installation, audio, Store downloads, Xbox sign-in/game launch, and later Edge/WebView2 installation before relying on the image.
+These checks parse the script and exercise its protection filters, original-list counts, protected AppX prefixes, boot-index export loop, absence of policy stages, and embedded executable checksum. Command doubles also exercise feature enabling, missing NetFx3 sources, driver injection/failures, and a disposable GSecurity overlay. They do not execute Micro's Windows build or prove a bootable/functioning result.
