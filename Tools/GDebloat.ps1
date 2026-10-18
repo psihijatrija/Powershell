@@ -9296,7 +9296,7 @@ Get-ChildItem -LiteralPath $sourceDirectory -File -Force | Copy-Item -Destinatio
 Write-Host "Deleting WinSxS. This may take a while..."
 Replace-GDebloatWinSxS -WindowsDirectory (Join-Path $mainOSDrive 'scratchdir\Windows')
 Write-Host "Complete!"
-}
+} 1>$null 2>> (Join-Path $mainOSDrive 'WinSxS-install-errors.log') 3>$null 4>$null 5>$null 6>$null
 Write-Host 'INSTALL.WIM WinSxS reduction Completed...' -ForegroundColor Green
 
 
@@ -11469,7 +11469,7 @@ Get-ChildItem -LiteralPath $sourceDirectory -File -Force | Copy-Item -Destinatio
 Write-Host "Deleting WinSxS. This may take a while..."
 Replace-GDebloatWinSxS -WindowsDirectory (Join-Path $mainOSDrive 'scratchdir\Windows')
 Write-Host "Complete!"
-}
+} 1>$null 2>> (Join-Path $mainOSDrive 'WinSxS-boot-errors.log') 3>$null 4>$null 5>$null 6>$null
 Write-Host 'BOOT.WIM WinSxS cleanup Completed...' -ForegroundColor Green
 
 
