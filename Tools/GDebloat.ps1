@@ -517,7 +517,8 @@ try {
     $images = @(Get-WindowsImage -ImagePath $sourceImage)
     if ($images.Count -eq 0) { throw "No Windows images found in $sourceImage." }
 
-    if ($ImageIndex -le 0 -or $ImageIndex -gt $images.Count) {
+    $availableIndexes = @($images | ForEach-Object { [int]$_.ImageIndex })
+    if ($ImageIndex -notin $availableIndexes) {
         if ($images.Count -eq 1) {
             $ImageIndex = [int]$images[0].ImageIndex
             Write-Step "Single edition found: [$ImageIndex] $($images[0].ImageName)"
@@ -525,21 +526,23 @@ try {
             Write-Host ""
             Write-Host "Multiple editions found in source image:" -ForegroundColor Yellow
             foreach ($img in $images) {
-                Write-Host ("  [{0}] {1} ({2})" -f $img.ImageIndex, $img.ImageName, $img.Version) -ForegroundColor White
+                Write-Host ("  [{0}] {1}" -f $img.ImageIndex, $img.ImageName) -ForegroundColor White
             }
+            $ImageIndex = 0
             do {
-                $sel = Read-Host "Select edition index [1-$($images.Count)]"
+                $sel = Read-Host "Select edition index [$($availableIndexes -join ', ')]"
                 $parsed = 0
-                if ([int]::TryParse($sel, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le $images.Count) {
+                if ([int]::TryParse($sel, [ref]$parsed) -and $parsed -in $availableIndexes) {
                     $ImageIndex = $parsed
                 } else {
-                    Write-Warning "Invalid selection. Please enter a number between 1 and $($images.Count)."
+                    Write-Warning "Invalid selection. Choose one of: $($availableIndexes -join ', ')."
                 }
-            } until ($ImageIndex -gt 0)
+            } until ($ImageIndex -in $availableIndexes)
         }
     }
 
-    $selectedImage = $images | Where-Object { $_.ImageIndex -eq $ImageIndex } | Select-Object -First 1
+    # The list query returns summaries; Version is available only in image details.
+    $selectedImage = Get-WindowsImage -ImagePath $sourceImage -Index $ImageIndex -ErrorAction Stop
     Write-Step "Selected edition: [$ImageIndex] $($selectedImage.ImageName) (Version: $($selectedImage.Version))"
 
     # Stage media files (excluding install images, autounattend.xml, and unnecessary upgrade files)
