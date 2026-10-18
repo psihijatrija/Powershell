@@ -11,8 +11,8 @@ Source SHA256: 46254253E4B18470221DFF828C7F1F5BBB0B4339C3369571AD7F4BBA9D22F20B
 param(
  [string]$SourceIso,
  [int]$ImageIndex = 0,
- [string]$OutputIso = (Join-Path $PSScriptRoot 'GDebloat.iso'),
- [string]$WorkDirectory = (Join-Path $env:TEMP 'GDebloat'),
+ [string]$OutputIso,
+ [string]$WorkDirectory,
  [string]$OscdimgPath,
  [string]$DriverDirectory,
  [string]$GSecurityDirectory,
@@ -20,6 +20,14 @@ param(
  [switch]$SkipAutoDrivers,
  [switch]$SkipGSecurity
 )
+# Initialize runtime paths after parameter binding (Windows PowerShell 5.1).
+if ([string]::IsNullOrWhiteSpace($OutputIso)) {
+ $OutputIso = Join-Path $PSScriptRoot 'GDebloat.iso'
+}
+if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
+ $WorkDirectory = Join-Path ([IO.Path]::GetTempPath()) 'GDebloat'
+}
+# End runtime path initialization.
 if ([Environment]::OSVersion.Platform -ne 'Win32NT' -or -not [Environment]::Is64BitProcess) {
  throw 'Use elevated 64-bit Windows PowerShell.'
 }

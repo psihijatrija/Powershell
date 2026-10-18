@@ -6,6 +6,27 @@ $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors -join "`n") }
 function Assert($Value, [string]$Message) { if (-not $Value) { throw $Message } }
+# Default paths must not evaluate PSScriptRoot or environment variables in param().
+foreach ($parameter in $ast.ParamBlock.Parameters) {
+ if ($parameter.Name.VariablePath.UserPath -in @('OutputIso', 'WorkDirectory')) {
+  Assert ($null -eq $parameter.DefaultValue) 'Path still initialized during parameter binding'
+ }
+}
+$sourceText = [IO.File]::ReadAllText($path)
+$start = $sourceText.IndexOf('# Initialize runtime paths after parameter binding')
+$end = $sourceText.IndexOf('# End runtime path initialization.', $start)
+$initializePaths = [scriptblock]::Create($sourceText.Substring($start, $end - $start))
+$savedScriptRoot = $PSScriptRoot
+try {
+ $PSScriptRoot = [IO.Path]::GetTempPath()
+ $OutputIso = $null; $WorkDirectory = $null
+ . $initializePaths
+ Assert ($OutputIso -eq (Join-Path $PSScriptRoot 'GDebloat.iso')) 'Default output path incorrect'
+ Assert (-not [string]::IsNullOrWhiteSpace($WorkDirectory)) 'Default work path missing'
+ $OutputIso = 'chosen.iso'; $WorkDirectory = 'chosen-work'
+ . $initializePaths
+ Assert ($OutputIso -eq 'chosen.iso' -and $WorkDirectory -eq 'chosen-work') 'Explicit paths overridden'
+} finally { $PSScriptRoot = $savedScriptRoot }
 $nodes = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)
 $filter = $nodes | Where-Object Name -eq 'Test-Micro11CleanupPathForArchitecture'
 . ([scriptblock]::Create($filter.Extent.Text))
