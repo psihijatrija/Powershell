@@ -25,7 +25,7 @@ if ([string]::IsNullOrWhiteSpace($OutputIso)) {
  $OutputIso = Join-Path $PSScriptRoot 'GDebloat.iso'
 }
 if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
- $WorkDirectory = Join-Path ([IO.Path]::GetTempPath()) 'GDebloat'
+ $WorkDirectory = [IO.Path]::GetPathRoot($env:SystemRoot)
 }
 # End runtime path initialization.
 if ([Environment]::OSVersion.Platform -ne 'Win32NT' -or -not [Environment]::Is64BitProcess) {
@@ -39,10 +39,17 @@ if (Test-Path -LiteralPath $OutputIso) { throw "Output already exists: $OutputIs
 # Console presentation: section headers + completion footers only; section bodies are silent.
 # Automatically set a usable execution policy when required.
 # No yes/no prompt is shown.
+function Convert-GDebloatNativePath([string]$Path) {
+ if ($Path.StartsWith('\\?\')) { return $Path }
+ if ($Path.StartsWith('\\')) { return '\\?\UNC\' + $Path.Substring(2) }
+ if ($Path -match '^[A-Za-z]:\\') { return '\\?\' + $Path }
+ return $Path
+}
+
 function Replace-GDebloatWinSxS([string]$WindowsDirectory) {
  $original = Join-Path $WindowsDirectory 'WinSxS'
  $replacement = Join-Path $WindowsDirectory 'WinSxS_edit'
- $backupName = 'WinSxS_remove_' + [guid]::NewGuid().ToString('N')
+ $backupName = 'sx_' + [guid]::NewGuid().ToString('N').Substring(0,8)
  $backup = Join-Path $WindowsDirectory $backupName
  # Rename the old tree first: a partial recursive deletion must not occupy
  # the destination name and prevent Micro's prepared tree from being installed.
@@ -62,7 +69,8 @@ function Replace-GDebloatWinSxS([string]$WindowsDirectory) {
   $previousPreference = $ErrorActionPreference
   try {
    $ErrorActionPreference = 'Continue'
-   $cleanupOutput = @(& "$env:SystemRoot\System32\cmd.exe" /d /c "rd /s /q `"$backup`"" 2>&1)
+   $nativeBackup = Convert-GDebloatNativePath $backup
+   $cleanupOutput = @(& "$env:SystemRoot\System32\cmd.exe" /d /c "rd /s /q `"$nativeBackup`"" 2>&1)
    $cleanupExit = $LASTEXITCODE
   } finally { $ErrorActionPreference = $previousPreference }
   if ($cleanupExit -ne 0 -or (Test-Path -LiteralPath $backup)) {
@@ -136,7 +144,7 @@ if (! $myWindowsPrincipal.IsInRole($adminRole))
  [System.Diagnostics.Process]::Start($newProcess);
  exit
 }
-$mainOSDrive = Join-Path ([IO.Path]::GetFullPath($WorkDirectory)) ('Build-' + [guid]::NewGuid().ToString('N'))
+$mainOSDrive = Join-Path ([IO.Path]::GetFullPath($WorkDirectory)) ('GB' + [guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Path $mainOSDrive -Force | Out-Null
 Start-Transcript -Path (Join-Path $mainOSDrive 'GDebloat.log')
 Write-Host ""

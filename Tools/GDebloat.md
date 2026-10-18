@@ -14,7 +14,7 @@ The source was `TrimKit/Micro 11 Barebones.ps1`, SHA-256 `46254253E4B18470221DFF
 - Kept Micro's boot-image and setup-media debloat enabled by default. Boot driver, hive/profile, setup engine/provider and relevant resource paths are excluded. Every boot index is retained; Micro's index-1 deletion is removed and the final rebuild exports all indexes. The normal Microsoft Setup image remains the bootable image.
 - Removed execution-policy changes, install policy/tweak stages, and offline registry mutation/cleanup/compaction stages. Boot hives are not loaded, edited, compacted or cleaned. Unused original registry helper definitions remain. No fake WSUS, UAC, pagefile, CPU-mitigation, or other policy tweaks are applied. Micro's update-file removal remains; automatic updates are not separately disabled by a new policy.
 - Removed the empty WinRE placeholder. Edge, WebView2 and recovery removals remain.
-- Isolated Micro's work under a fresh child of `-WorkDirectory`; existing parent-directory contents are not cleared. Added optional source-drive/index/output parameters and removed the completion prompt. Existing output files are not overwritten.
+- Isolated Micro's work under a fresh, short `GBxxxxxxxx` child of `-WorkDirectory` (default: the Windows system-drive root); existing parent-directory contents are not cleared. Added optional source-drive/index/output parameters and removed the completion prompt. Existing output files are not overwritten.
 
 ## Run
 
@@ -25,7 +25,7 @@ Use elevated **64-bit Windows PowerShell** on Windows. The source parameter foll
   -OutputIso 'E:\Test\GDebloat.iso' -WorkDirectory 'C:\ISO_Build'
 ```
 
-Running `.\GDebloat.ps1` prompts for the drive and edition. The old `SizeProfile` option is not part of this literal Micro adaptation. Driver and GSecurity inclusion are automatic as described below. The output defaults to `GDebloat.iso` beside the script. Logs remain in the isolated work folder.
+Running `.\GDebloat.ps1` prompts for the drive and edition. The old `SizeProfile` option is not part of this literal Micro adaptation. Driver and GSecurity inclusion are automatic as described below. The output defaults to `GDebloat.iso` beside the script. Logs remain in the isolated work folder. The short default path avoids Windows PowerShell 5.1 path-length failures. WinSxS replacement uses a short temporary name; native cleanup uses the extended `\\?\` path syntax.
 
 Use the source media or the auto-detected `Drivers` folder for the hardware drivers you need. Preserving drivers does not add Intel VMD/RST, RAID or Ethernet drivers absent from the source. Boot and install the original media on the same hardware when diagnosing a media-driver message.
 

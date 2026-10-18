@@ -15,6 +15,8 @@ foreach ($parameter in $ast.ParamBlock.Parameters) {
 $sourceText = [IO.File]::ReadAllText($path)
 $start = $sourceText.IndexOf('# Initialize runtime paths after parameter binding')
 $end = $sourceText.IndexOf('# End runtime path initialization.', $start)
+$savedSystemRoot = $env:SystemRoot
+if (-not $env:SystemRoot) { $env:SystemRoot = [IO.Path]::GetTempPath() }
 $pathFixture = Join-Path ([IO.Path]::GetTempPath()) ('gdebloat-path-' + [guid]::NewGuid().ToString('N') + '.ps1')
 $fixtureText = 'param([string]$OutputIso, [string]$WorkDirectory)' + "`n" +
  $sourceText.Substring($start, $end - $start) + "`n" +
@@ -26,7 +28,7 @@ try {
  Assert (-not [string]::IsNullOrWhiteSpace($defaults.Work)) 'Default work path missing'
  $explicit = & $pathFixture -OutputIso 'chosen.iso' -WorkDirectory 'chosen-work'
  Assert ($explicit.Output -eq 'chosen.iso' -and $explicit.Work -eq 'chosen-work') 'Explicit paths overridden'
-} finally { Remove-Item -LiteralPath $pathFixture -Force }
+} finally { Remove-Item -LiteralPath $pathFixture -Force; $env:SystemRoot = $savedSystemRoot }
 $nodes = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)
 $filter = $nodes | Where-Object Name -eq 'Test-Micro11CleanupPathForArchitecture'
 . ([scriptblock]::Create($filter.Extent.Text))
@@ -76,6 +78,10 @@ $sha = [Security.Cryptography.SHA256]::Create()
 try { $hash = [BitConverter]::ToString($sha.ComputeHash([Convert]::FromBase64String($script:EmbeddedOscdimgBase64))).Replace('-', '') }
 finally { $sha.Dispose() }
 Assert ($hash -eq 'F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD') 'Embedded oscdimg changed'
+. ([scriptblock]::Create(($nodes | Where-Object Name -eq 'Convert-GDebloatNativePath').Extent.Text))
+Assert ((Convert-GDebloatNativePath 'C:\long\path') -eq '\\?\C:\long\path') 'Extended drive path incorrect'
+Assert ((Convert-GDebloatNativePath '\\server\share\path') -eq '\\?\UNC\server\share\path') 'Extended UNC path incorrect'
+Assert ((Convert-GDebloatNativePath '\\?\C:\already') -eq '\\?\C:\already') 'Extended prefix duplicated'
 . ([scriptblock]::Create(($nodes | Where-Object Name -eq 'Replace-GDebloatWinSxS').Extent.Text))
 $swapFixture = Join-Path ([IO.Path]::GetTempPath()) ('gdebloat-swap-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path (Join-Path $swapFixture 'WinSxS'), (Join-Path $swapFixture 'WinSxS_edit') -Force | Out-Null
