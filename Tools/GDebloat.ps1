@@ -189,7 +189,9 @@ function Write-Info([string]$Message) {
 function Invoke-Native([string]$File, [string[]]$Arguments, [int[]]$SuccessCodes = @(0)) {
     & $File @Arguments | Out-Host
     if ($LASTEXITCODE -notin $SuccessCodes) {
-        throw "$File failed with exit code $LASTEXITCODE. Arguments: $($Arguments -join ' ')"
+        $nativeError = New-Object System.InvalidOperationException("$File failed with exit code $LASTEXITCODE. Arguments: $($Arguments -join ' ')")
+        $nativeError.Data['ExitCode'] = [int]$LASTEXITCODE
+        throw $nativeError
     }
 }
 
@@ -934,7 +936,18 @@ try {
     # ========================================================================
     Write-Header "STAGE 9: COMPONENT CLEANUP AND WINSXS COMPACTION"
     Write-Step "Executing DISM /StartComponentCleanup /ResetBase..."
-    Invoke-Dism @("/Image:$mount", '/Cleanup-Image', '/StartComponentCleanup', '/ResetBase')
+    $componentCleanupCompleted = $false
+    $componentCleanupSkipReason = $null
+    try {
+        Invoke-Dism @("/Image:$mount", '/Cleanup-Image', '/StartComponentCleanup', '/ResetBase')
+        $componentCleanupCompleted = $true
+    } catch {
+        # CBS_E_PENDING: offline feature changes can require the installed OS
+        # to boot before cleanup is possible. Preserve those pending actions.
+        if ($_.Exception.Data['ExitCode'] -ne -2146498554) { throw }
+        $componentCleanupSkipReason = 'Pending servicing operations (0x800f0806)'
+        Write-Warning "Component cleanup skipped: $componentCleanupSkipReason. The image may be larger; pending actions are retained for first boot."
+    }
     Invoke-Dism @("/Image:$mount", '/Cleanup-Image', '/ScanHealth')
 
     $winrePresent = Test-Path -LiteralPath $winrePath
@@ -1076,6 +1089,8 @@ try {
         BootAndInstallTested = $false
         WinRERemoved = (-not $KeepWinRE -and -not $winrePresent)
         ReservedStorageDisabled = $true
+        ComponentCleanupCompleted = $componentCleanupCompleted
+        ComponentCleanupSkipReason = $componentCleanupSkipReason
         RemovedAppsCount = $removedAppCount
         RemovedCapabilitiesCount = $removedCapCount
         CapabilityRemovalFailures = @($capabilityRemovalFailures)
