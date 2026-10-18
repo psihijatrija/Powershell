@@ -57,7 +57,8 @@
     Defaults to '<CurrentDir>\Windows-Optimized-<Timestamp>.iso'.
 
 .PARAMETER WorkDirectory
-    Directory used for staging and mounting. Must be on an NTFS drive with at least 20 GB free.
+    Parent directory for a unique build staging folder. Existing contents are preserved.
+    Must be on an NTFS drive with at least 20 GB free.
     Defaults to '$env:TEMP\WinBuild-<Random>' or a dedicated scratch directory.
 
 .PARAMETER ImageIndex
@@ -73,9 +74,6 @@
 
 .PARAMETER OscdimgPath
     Optional explicit path to oscdimg.exe. If omitted, the script auto-discovers it.
-
-.PARAMETER UserName
-    Default local administrator user name created by autounattend.xml. Default: 'Admin'.
 
 .PARAMETER KeepWinRE
     Switch to retain Windows Recovery Environment (winre.wim).
@@ -96,9 +94,6 @@ param(
     [string]$OscdimgPath,
     [string]$NetFx3Source,
     [string]$GSecurityIsoDirectory,
-    [string]$SetupScript,
-    [string]$FirstLogonScript,
-    [ValidatePattern('^[A-Za-z][A-Za-z0-9_-]{0,19}$')][string]$UserName = 'Admin',
     [switch]$KeepWinRE,
     [switch]$DisableAutomaticUpdates
 )
@@ -295,14 +290,13 @@ function Copy-IsoOverlayInternal([string]$SourceDirectory, [string]$MediaDirecto
 
 function Invoke-RegUnload([string]$HiveKey, [int]$MaxRetries = 15) {
     for ($i = 1; $i -le $MaxRetries; $i++) {
-        & reg.exe unload $HiveKey > $null 2>&1
+        & reg.exe unload "HKLM\$HiveKey" > $null 2>&1
         if ($LASTEXITCODE -eq 0) { return $true }
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
         Start-Sleep -Milliseconds 400
     }
-    Write-Warning "Failed to unload registry hive $HiveKey after $MaxRetries attempts."
-    return $false
+    throw "Failed to unload registry hive HKLM\$HiveKey after $MaxRetries attempts."
 }
 
 # ============================================================================
@@ -310,12 +304,6 @@ function Invoke-RegUnload([string]$HiveKey, [int]$MaxRetries = 15) {
 # ============================================================================
 Write-Header "GDEBLOAT - WINDOWS 11/10 OPTIMIZED GAMING ISO CREATOR by Gorstak"
 Write-Info "Checking system environment and tools..."
-
-$OscdimgPath = Get-OscdimgExecutable -ExplicitPath $OscdimgPath -TargetDirectory $WorkDirectory
-if (!$OscdimgPath) {
-    throw "oscdimg.exe was not found. Place oscdimg.exe in the script folder or install the Windows ADK."
-}
-Write-Step "Using oscdimg: $OscdimgPath"
 
 # Auto-detect default GSecurity candidate if not specified
 if (!$GSecurityIsoDirectory) {
@@ -441,6 +429,9 @@ if (!$isDriveLetter) {
 
 # Determine full paths
 $OutputIso = [IO.Path]::GetFullPath($OutputIso)
+if (!$isDriveLetter -and $OutputIso -ieq $SourceIso) {
+    throw 'Output ISO must be different from the source ISO.'
+}
 if (Test-Path -LiteralPath $OutputIso) {
     $owChoice = Read-Host "Output ISO '$OutputIso' already exists. Overwrite? [y/N]"
     if ($owChoice.Trim() -notmatch '^(y|yes)$') {
@@ -465,21 +456,15 @@ if ($driveInfo.AvailableFreeSpace -lt 20GB) {
     throw "At least 20 GB of free space is required on volume $workRoot. Available: $([Math]::Round($driveInfo.AvailableFreeSpace / 1GB, 2)) GB"
 }
 
-if (Test-Path -LiteralPath $WorkDirectory) {
-    Write-Warning "Work directory '$WorkDirectory' already exists."
-    $cleanChoice = Read-Host "Clean and reuse this work directory? [Y/n]"
-    if ($cleanChoice.Trim() -notmatch '^(n|no)$') {
-        try {
-            Remove-Item -LiteralPath $WorkDirectory -Recurse -Force -ErrorAction Stop
-        } catch {
-            $WorkDirectory = Join-Path $workRoot ('WinBuildWork_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
-            Write-Info "Could not clear existing work directory. Using new path: $WorkDirectory"
-        }
-    } else {
-        $WorkDirectory = Join-Path $workRoot ('WinBuildWork_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
-        Write-Info "Using new path: $WorkDirectory"
-    }
+# Never clear a caller-owned directory. Each build owns only a fresh child.
+$WorkDirectory = Join-Path $WorkDirectory ('GDebloat-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $WorkDirectory -ErrorAction Stop | Out-Null
+
+$OscdimgPath = Get-OscdimgExecutable -ExplicitPath $OscdimgPath -TargetDirectory $WorkDirectory
+if (!$OscdimgPath) {
+    throw "oscdimg.exe was not found. Place oscdimg.exe in the script folder or install the Windows ADK."
 }
+Write-Step "Using oscdimg: $OscdimgPath"
 
 # ============================================================================
 # MOUNTING AND SETUP MEDIA PREPARATION
@@ -613,6 +598,8 @@ try {
     )
     $mountedInstallImage = $true
 
+    $netfxState = [string](Get-WindowsOptionalFeature -Path $mount -FeatureName NetFx3).State
+
     # ========================================================================
     # OFFLINE FEATURE INJECTION (.NET 3.5 & DIRECTPLAY)
     # ========================================================================
@@ -688,24 +675,6 @@ try {
     }
     Write-Step "Removed $removedAppCount unwanted provisioned packages."
 
-    # Clean residual folders in WindowsApps
-    $windowsAppsDir = Join-Path $mount 'Program Files\WindowsApps'
-    if (Test-Path -LiteralPath $windowsAppsDir) {
-        Get-ChildItem -LiteralPath $windowsAppsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $folderName = $_.Name
-            $shouldRemove = $false
-            foreach ($bloat in $ProfileData.RemoveApps) {
-                if ($folderName -like "$bloat*") {
-                    $shouldRemove = $true
-                    break
-                }
-            }
-            if ($shouldRemove -and -not (Test-KeptApp $folderName)) {
-                try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch {}
-            }
-        }
-    }
-
     # ========================================================================
     # REMOVING BLOATED CAPABILITIES & FEATURES
     # ========================================================================
@@ -725,7 +694,7 @@ try {
             }
             if ($match) {
                 Write-Step "Removing capability: $($cap.Name)"
-                Remove-WindowsCapability -Path $mount -Name $cap.Name -ErrorAction SilentlyContinue | Out-Null
+                Remove-WindowsCapability -Path $mount -Name $cap.Name -ErrorAction Stop | Out-Null
                 $removedCapCount++
             }
         }
@@ -747,7 +716,7 @@ try {
     $winrePath = Join-Path $mount 'Windows\System32\Recovery\winre.wim'
     if (!$KeepWinRE -and (Test-Path -LiteralPath $winrePath)) {
         Write-Step "Removing winre.wim recovery payload (saving ~500-700 MB)..."
-        Remove-Item -LiteralPath $winrePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $winrePath -Force -ErrorAction Stop
     } else {
         Write-Info "WinRE retained."
     }
@@ -765,14 +734,14 @@ try {
     $hLoaded = @{ SYSTEM = $false; SOFTWARE = $false; DEFAULT = $false; NTUSER = $false }
 
     try {
-        & reg.exe load HKLM\TK_SYSTEM $systemHive | Out-Null
+        Invoke-Native 'reg.exe' @('load', 'HKLM\TK_SYSTEM', $systemHive)
         $hLoaded.SYSTEM = ($LASTEXITCODE -eq 0)
-        & reg.exe load HKLM\TK_SOFTWARE $softwareHive | Out-Null
+        Invoke-Native 'reg.exe' @('load', 'HKLM\TK_SOFTWARE', $softwareHive)
         $hLoaded.SOFTWARE = ($LASTEXITCODE -eq 0)
-        & reg.exe load HKLM\TK_DEFAULT $defaultHive | Out-Null
+        Invoke-Native 'reg.exe' @('load', 'HKLM\TK_DEFAULT', $defaultHive)
         $hLoaded.DEFAULT = ($LASTEXITCODE -eq 0)
         if (Test-Path -LiteralPath $ntuserHive) {
-            & reg.exe load HKLM\TK_NTUSER $ntuserHive | Out-Null
+            Invoke-Native 'reg.exe' @('load', 'HKLM\TK_NTUSER', $ntuserHive)
             $hLoaded.NTUSER = ($LASTEXITCODE -eq 0)
         }
 
@@ -781,68 +750,72 @@ try {
         # AudioEndpointBuilder (Windows Audio Endpoint Builder) -> Start=2 (Automatic)
         # MMCSS (Multimedia Class Scheduler)
         Write-Step "Configuring Windows Audio services for guaranteed startup..."
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\Audiosrv" /v Start /t REG_DWORD /d 2 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\AudioEndpointBuilder" /v Start /t REG_DWORD /d 2 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\MMCSS" /v Start /t REG_DWORD /d 2 /f | Out-Null
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\Audiosrv", '/v', 'Start', '/t', 'REG_DWORD', '/d', '2', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\AudioEndpointBuilder", '/v', 'Start', '/t', 'REG_DWORD', '/d', '2', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\MMCSS", '/v', 'Start', '/t', 'REG_DWORD', '/d', '2', '/f')
 
         # 2. STORE & XBOX SERVICE GUARANTEES:
         # AppXSvc, ClipSVC (Licensing), BITS, wuauserv, InstallService, Xbox services
         Write-Step "Configuring Microsoft Store and Xbox Live services..."
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\AppXSvc" /v Start /t REG_DWORD /d 3 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\ClipSVC" /v Start /t REG_DWORD /d 3 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\BITS" /v Start /t REG_DWORD /d 3 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\InstallService" /v Start /t REG_DWORD /d 3 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\XblAuthManager" /v Start /t REG_DWORD /d 3 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\XblGameSave" /v Start /t REG_DWORD /d 3 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\XboxNetApiSvc" /v Start /t REG_DWORD /d 3 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Services\XboxGipSvc" /v Start /t REG_DWORD /d 3 /f | Out-Null
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\AppXSvc", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\ClipSVC", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\BITS", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\InstallService", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\XblAuthManager", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\XblGameSave", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\XboxNetApiSvc", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Services\XboxGipSvc", '/v', 'Start', '/t', 'REG_DWORD', '/d', '3', '/f')
 
         # 3. LABCONFIG HARDWARE BYPASSES (TPM, CPU, RAM, SecureBoot, Storage):
         Write-Step "Injecting hardware requirement bypasses into install image..."
-        & reg.exe add "HKLM\TK_SYSTEM\Setup\LabConfig" /v BypassTPMCheck /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\Setup\LabConfig" /v BypassCPUCheck /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\Setup\LabConfig" /v BypassRAMCheck /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\Setup\LabConfig" /v BypassSecureBootCheck /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\Setup\LabConfig" /v BypassStorageCheck /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\Setup\LabConfig" /v BypassDiskCheck /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\Setup\MoSetup" /v AllowUpgradesWithUnsupportedTPMOrCPU /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SYSTEM\ControlSet001\Control\BitLocker" /v PreventDeviceEncryption /t REG_DWORD /d 1 /f | Out-Null
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\Setup\LabConfig", '/v', 'BypassTPMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\Setup\LabConfig", '/v', 'BypassCPUCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\Setup\LabConfig", '/v', 'BypassRAMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\Setup\LabConfig", '/v', 'BypassSecureBootCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\Setup\LabConfig", '/v', 'BypassStorageCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\Setup\LabConfig", '/v', 'BypassDiskCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\Setup\MoSetup", '/v', 'AllowUpgradesWithUnsupportedTPMOrCPU', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SYSTEM\ControlSet001\Control\BitLocker", '/v', 'PreventDeviceEncryption', '/t', 'REG_DWORD', '/d', '1', '/f')
 
         # 4. SPACE SAVING: DISABLE RESERVED STORAGE (Saves ~7 GB on installed disk):
         Write-Step "Disabling Windows 11 Reserved Storage (saves ~7 GB disk space on install)..."
-        & reg.exe add "HKLM\TK_SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager" /v ShippedWithReserves /t REG_DWORD /d 0 /f | Out-Null
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager", '/v', 'ShippedWithReserves', '/t', 'REG_DWORD', '/d', '0', '/f')
 
         # 5. PRIVACY & TELEMETRY TWEAKS:
         Write-Step "Applying gaming privacy and background telemetry reduction..."
-        & reg.exe add "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\DataCollection" /v AllowTelemetry /t REG_DWORD /d 0 /f | Out-Null
-        & reg.exe add "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" /v DisabledByGroupPolicy /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" /v AllowTelemetry /t REG_DWORD /d 0 /f | Out-Null
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\DataCollection", '/v', 'AllowTelemetry', '/t', 'REG_DWORD', '/d', '0', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo", '/v', 'DisabledByGroupPolicy', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection", '/v', 'AllowTelemetry', '/t', 'REG_DWORD', '/d', '0', '/f')
 
         # 6. DISABLE CHAT / COPILOT / CONSUMER PROMOTIONS:
-        & reg.exe add "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\Windows Copilot" /v TurnOffWindowsCopilot /t REG_DWORD /d 1 /f | Out-Null
-        & reg.exe add "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\CloudContent" /v DisableWindowsConsumerFeatures /t REG_DWORD /d 1 /f | Out-Null
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\Windows Copilot", '/v', 'TurnOffWindowsCopilot', '/t', 'REG_DWORD', '/d', '1', '/f')
+        Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\CloudContent", '/v', 'DisableWindowsConsumerFeatures', '/t', 'REG_DWORD', '/d', '1', '/f')
 
         # 7. UPDATE POLICY (IF REQUESTED):
         if ($DisableAutomaticUpdates) {
-            Write-Step "Configuring Windows Update to notify before download..."
-            & reg.exe add "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" /v NoAutoUpdate /t REG_DWORD /d 1 /f | Out-Null
+            Write-Step "Disabling automatic Windows Update..."
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU", '/v', 'NoAutoUpdate', '/t', 'REG_DWORD', '/d', '1', '/f')
         }
 
         # 8. DEFAULT USER / NEW ACCOUNTS TWEAKS:
         if ($hLoaded.DEFAULT) {
-            & reg.exe add "HKLM\TK_DEFAULT\Control Panel\UnsupportedHardwareNotificationCache" /v SV1 /t REG_DWORD /d 0 /f | Out-Null
-            & reg.exe add "HKLM\TK_DEFAULT\Control Panel\UnsupportedHardwareNotificationCache" /v SV2 /t REG_DWORD /d 0 /f | Out-Null
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_DEFAULT\Control Panel\UnsupportedHardwareNotificationCache", '/v', 'SV1', '/t', 'REG_DWORD', '/d', '0', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_DEFAULT\Control Panel\UnsupportedHardwareNotificationCache", '/v', 'SV2', '/t', 'REG_DWORD', '/d', '0', '/f')
         }
         if ($hLoaded.NTUSER) {
-            & reg.exe add "HKLM\TK_NTUSER\Control Panel\UnsupportedHardwareNotificationCache" /v SV1 /t REG_DWORD /d 0 /f | Out-Null
-            & reg.exe add "HKLM\TK_NTUSER\Control Panel\UnsupportedHardwareNotificationCache" /v SV2 /t REG_DWORD /d 0 /f | Out-Null
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_NTUSER\Control Panel\UnsupportedHardwareNotificationCache", '/v', 'SV1', '/t', 'REG_DWORD', '/d', '0', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_NTUSER\Control Panel\UnsupportedHardwareNotificationCache", '/v', 'SV2', '/t', 'REG_DWORD', '/d', '0', '/f')
         }
     } finally {
         Write-Info "Unloading registry hives..."
-        if ($hLoaded.NTUSER) { Invoke-RegUnload 'TK_NTUSER' }
-        if ($hLoaded.DEFAULT) { Invoke-RegUnload 'TK_DEFAULT' }
-        if ($hLoaded.SOFTWARE) { Invoke-RegUnload 'TK_SOFTWARE' }
-        if ($hLoaded.SYSTEM) { Invoke-RegUnload 'TK_SYSTEM' }
+        $unloadErrors = @()
+        foreach ($hive in @('NTUSER', 'DEFAULT', 'SOFTWARE', 'SYSTEM')) {
+            if ($hLoaded[$hive]) {
+                try { Invoke-RegUnload "TK_$hive" | Out-Null }
+                catch { $unloadErrors += $_.Exception.Message }
+            }
+        }
+        if ($unloadErrors.Count -gt 0) { throw ($unloadErrors -join '; ') }
     }
 
     # ========================================================================
@@ -852,7 +825,7 @@ try {
 
     # Embedded lightweight autounattend.xml:
     # - Skips Microsoft Account requirement in OOBE
-    # - Creates local Administrator account
+    # - Leaves account creation to interactive OOBE
     # - Skips EULA, telemetry, and wireless network setup screens
     # - Retains interactive disk selection so user controls partitioning
     $autounattendXml = @"
@@ -900,16 +873,7 @@ try {
         <NetworkLocation>Work</NetworkLocation>
         <ProtectYourPC>3</ProtectYourPC>
       </OOBE>
-      <UserAccounts>
-        <LocalAccounts>
-          <LocalAccount wcm:action="add">
-            <Password><Value></Value><PlainText>true</PlainText></Password>
-            <DisplayName>$UserName</DisplayName>
-            <Group>Administrators</Group>
-            <Name>$UserName</Name>
-          </LocalAccount>
-        </LocalAccounts>
-      </UserAccounts>
+
     </component>
   </settings>
 </unattend>
@@ -942,6 +906,7 @@ try {
     Invoke-Dism @("/Image:$mount", '/Cleanup-Image', '/StartComponentCleanup', '/ResetBase')
     Invoke-Dism @("/Image:$mount", '/Cleanup-Image', '/ScanHealth')
 
+    $winrePresent = Test-Path -LiteralPath $winrePath
     Write-Step "Committing and unmounting Windows image..."
     Invoke-Dism @('/Unmount-Image', "/MountDir:$mount", '/Commit', '/CheckIntegrity')
     $mountedInstallImage = $false
@@ -1005,17 +970,17 @@ try {
         Write-Step "Injecting LabConfig hardware bypasses into boot.wim..."
         $bLoaded = $false
         try {
-            & reg.exe load HKLM\TK_BOOTSYSTEM $bootSystemHive | Out-Null
+            Invoke-Native 'reg.exe' @('load', 'HKLM\TK_BOOTSYSTEM', $bootSystemHive)
             $bLoaded = ($LASTEXITCODE -eq 0)
 
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\Setup\LabConfig" /v BypassTPMCheck /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\Setup\LabConfig" /v BypassCPUCheck /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\Setup\LabConfig" /v BypassRAMCheck /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\Setup\LabConfig" /v BypassSecureBootCheck /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\Setup\LabConfig" /v BypassStorageCheck /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\Setup\LabConfig" /v BypassDiskCheck /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\Setup\MoSetup" /v AllowUpgradesWithUnsupportedTPMOrCPU /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\TK_BOOTSYSTEM\ControlSet001\Control\BitLocker" /v PreventDeviceEncryption /t REG_DWORD /d 1 /f | Out-Null
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassTPMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassCPUCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassRAMCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassSecureBootCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassStorageCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\LabConfig", '/v', 'BypassDiskCheck', '/t', 'REG_DWORD', '/d', '1', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\Setup\MoSetup", '/v', 'AllowUpgradesWithUnsupportedTPMOrCPU', '/t', 'REG_DWORD', '/d', '1', '/f')
+            Invoke-Native 'reg.exe' @('add', "HKLM\TK_BOOTSYSTEM\ControlSet001\Control\BitLocker", '/v', 'PreventDeviceEncryption', '/t', 'REG_DWORD', '/d', '1', '/f')
         } finally {
             if ($bLoaded) { Invoke-RegUnload 'TK_BOOTSYSTEM' }
         }
@@ -1073,11 +1038,12 @@ try {
         SelectedEdition = $selectedImage.ImageName
         SourceVersion = [string]$selectedImage.Version
         NetFx3Installed = [bool]($netfxState -in @('Enabled', 'EnablePending'))
-        MicrosoftStoreKept = $true
-        XboxPackagesKept = $true
+        MicrosoftStorePresent = [bool]$storeApp
+        XboxPackagesPresent = [bool]$xboxApp
         AudioServicesConfigured = $true
-        BootWimDriversIntact = $true
-        WinRERemoved = (-not $KeepWinRE)
+        BootWimDriverChangesRequested = $false
+        BootAndInstallTested = $false
+        WinRERemoved = (-not $KeepWinRE -and -not $winrePresent)
         ReservedStorageDisabled = $true
         RemovedAppsCount = $removedAppCount
         RemovedCapabilitiesCount = $removedCapCount
@@ -1093,14 +1059,8 @@ try {
     Write-Host ("  SHA256       : {0}" -f $isoHash) -ForegroundColor White
     Write-Host ("  Report       : {0}" -f $reportPath) -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Guarantees Verified:" -ForegroundColor Cyan
-    Write-Host "  [OK] Microsoft Store dependencies intact and protected" -ForegroundColor Green
-    Write-Host "  [OK] Xbox Live & Gaming services preserved and enabled" -ForegroundColor Green
-    Write-Host "  [OK] Windows Audio (Audiosrv, AudioEndpointBuilder, MMCSS) configured" -ForegroundColor Green
-    Write-Host "  [OK] .NET Framework 3.5 & DirectPlay enabled offline" -ForegroundColor Green
-    Write-Host "  [OK] boot.wim drivers & WinPE environment preserved (No Missing Driver Error)" -ForegroundColor Green
-    Write-Host "  [OK] Windows 11 hardware checks bypassed in setup and runtime" -ForegroundColor Green
-    Write-Host "  [OK] Maximum recovery-compression ESD export (/Compress:recovery)" -ForegroundColor Green
+    Write-Host "Offline build completed. See the report for observed package and feature states." -ForegroundColor Cyan
+    Write-Host "Boot, setup, Store, Xbox, and audio functionality require testing in a Windows VM." -ForegroundColor Yellow
 } finally {
     Write-Info "Cleaning up mount points and resources..."
     if ($mountedBootImage) {
