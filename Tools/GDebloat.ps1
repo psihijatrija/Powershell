@@ -685,6 +685,7 @@ try {
 
     $capabilities = @(Get-WindowsCapability -Path $mount)
     $removedCapCount = 0
+    $capabilityRemovalFailures = @()
     foreach ($cap in $capabilities) {
         if ($cap.State -eq 'Installed') {
             $match = $false
@@ -697,8 +698,35 @@ try {
             }
             if ($match) {
                 Write-Step "Removing capability: $($cap.Name)"
-                Remove-WindowsCapability -Path $mount -Name $cap.Name -ErrorAction Stop | Out-Null
-                $removedCapCount++
+                try {
+                    Remove-WindowsCapability -Path $mount -Name $cap.Name -ErrorAction Stop | Out-Null
+                    $remainingCapability = Get-WindowsCapability -Path $mount -Name $cap.Name -ErrorAction Stop
+                    if ($remainingCapability.State -eq 'Installed') {
+                        throw "Capability still installed after removal: $($cap.Name)"
+                    }
+                    $removedCapCount++
+                } catch {
+                    # ERROR_SXS_ASSEMBLY_MISSING: some media advertise a capability
+                    # whose servicing assembly is absent. Retain it, report the
+                    # failure, and still require the later DISM health check.
+                    $failure = $_
+                    $exception = $failure.Exception
+                    $assemblyMissing = $false
+                    while ($null -ne $exception) {
+                        if (($exception.HResult -band 0xFFFFFFFFL) -eq 0x80073701L) {
+                            $assemblyMissing = $true
+                            break
+                        }
+                        $exception = $exception.InnerException
+                    }
+                    if (-not $assemblyMissing) { throw }
+                    $capabilityRemovalFailures += [pscustomobject]@{
+                        Name = $cap.Name
+                        ErrorCode = '0x80073701'
+                        Message = $failure.Exception.Message
+                    }
+                    Write-Warning "Could not remove optional capability '$($cap.Name)': servicing assembly missing (0x80073701). Not counted as removed; image health will be checked before export."
+                }
             }
         }
     }
@@ -1050,6 +1078,7 @@ try {
         ReservedStorageDisabled = $true
         RemovedAppsCount = $removedAppCount
         RemovedCapabilitiesCount = $removedCapCount
+        CapabilityRemovalFailures = @($capabilityRemovalFailures)
     }
 
     $reportPath = "$OutputIso.report.json"
@@ -1062,6 +1091,9 @@ try {
     Write-Host ("  SHA256       : {0}" -f $isoHash) -ForegroundColor White
     Write-Host ("  Report       : {0}" -f $reportPath) -ForegroundColor Gray
     Write-Host ""
+    if ($capabilityRemovalFailures.Count -gt 0) {
+        Write-Warning "$($capabilityRemovalFailures.Count) optional capability removal(s) failed. See CapabilityRemovalFailures in the report."
+    }
     Write-Host "Offline build completed. See the report for observed package and feature states." -ForegroundColor Cyan
     Write-Host "Boot, setup, Store, Xbox, and audio functionality require testing in a Windows VM." -ForegroundColor Yellow
 } finally {
