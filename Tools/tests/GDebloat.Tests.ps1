@@ -43,17 +43,14 @@ foreach ($file in @('C:\work\scratchdir\Windows\System32\drivers\e2f.sys',
 }
 Assert (Test-Micro11CleanupPathForArchitecture 'C:\work\scratchdir\Windows\System32\Recovery\winre.wim') 'WinRE removal blocked'
 $gDebloatBootPhase = $true
-foreach ($file in @('sources\setup.exe', 'Windows\System32\dismapi.dll', 'Windows\System32\imagingprovider.dll',
-    'Windows\System32\wimprovider.dll', 'Windows\System32\vhdprovider.dll', 'Windows\System32\winpeshl.exe',
-    'Windows\Fonts', 'Users', 'Windows\System32\config', 'Windows\SysWOW64')) {
-    Assert (-not (Test-Micro11CleanupPathForArchitecture ('C:\work\scratchdir\' + $file))) "Boot protection missing: $file"
+foreach ($file in @('Windows\System32\drivers', 'Windows\System32\DriverStore',
+ 'Windows\INF', 'Windows\System32\config', 'Windows\SysWOW64', 'Users', 'ProgramData', 'sources\winsetupboot.hiv',
+ 'sources\winsetupboot.sys', 'Windows\System32\GroupPolicy')) {
+ Assert (-not (Test-Micro11CleanupPathForArchitecture ('C:\scratchdir\' + $file))) "Boot driver/registry protection missing: $file"
 }
-foreach ($file in @('Windows\System32\combase.dll', 'Windows\System32\kernelbase.dll',
- 'Windows\System32\winpeshl.exe', 'Windows\System32\wpeinit.exe', 'Windows\System32\diskpart.exe',
- 'Windows\WinSxS', 'Windows\System32', 'Windows\SysWOW64', 'Windows\en-US', 'Windows\Boot')) {
- Assert (-not (Test-Micro11CleanupPathForArchitecture ('C:\scratchdir\' + $file))) "WinPE dependency eligible for removal: $file"
+foreach ($file in @('sources\dismapi.dll', 'Windows\Fonts', 'Windows\Help')) {
+ Assert (Test-Micro11CleanupPathForArchitecture ('C:\scratchdir\' + $file)) "Original Micro boot removal blocked: $file"
 }
-Assert (Test-Micro11CleanupPathForArchitecture 'C:\scratchdir\Windows\Help') 'Boot ancillary cleanup unexpectedly blocked'
 $assignments = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] }, $true)
 $initialInstall = @($assignments | Where-Object { $_.Left.Extent.Text -eq '$installArchitectureAwareRemovalPaths' })[0]
 $initialBoot = @($assignments | Where-Object { $_.Left.Extent.Text -eq '$bootArchitectureAwareRemovalPaths' })[0]
@@ -74,13 +71,14 @@ foreach ($name in @('Microsoft.WindowsStore_1', 'Microsoft.GamingApp_1', 'Micros
     Assert (@($keepPrefixes | Where-Object { $name.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) "Protected app missing: $name"
 }
 $text = [IO.File]::ReadAllText($path)
-Assert ($text -notmatch '/Delete-Image') 'Boot index deletion remains'
+Assert ($text -match "'/Delete-Image'.*'/Index:1'") 'Original Micro boot index deletion missing'
 Assert ($text -notmatch 'Set-ExecutionPolicy|reg.exe add|reg.exe delete|reg load') 'Registry/policy modification remains'
-Assert ($text -match 'foreach \(\$gDebloatImage in \$gDebloatBootImages\)') 'Boot rebuild drops indexes'
+Assert ($text -notmatch 'gDebloatBootImages') 'Custom multi-index boot rebuild remains'
+Assert ($text -match '"/SourceImageFile:\$bootWim" ''/SourceIndex:1''') 'Original Micro boot export missing'
 $bootSectionStart = $text.IndexOf('Write-Host "BOOT.WIM - MOUNT AND PREPARATION"')
 $bootSectionEnd = $text.IndexOf('Write-Host "BOOT.WIM - COMMIT AND PHYSICAL WIM REBUILD"', $bootSectionStart)
 $bootSection = $text.Substring($bootSectionStart, $bootSectionEnd - $bootSectionStart)
-Assert ($bootSection -notmatch 'WinSxS_edit|Rename-Item|Remove-Item.*WinSxS') 'Boot component-store stripping remains'
+Assert ($bootSection -match 'WinSxS_edit') 'Original Micro boot WinSxS trimming missing'
 Assert ($text -notmatch 'MicroFileLinks|Unsupported reparse tag|Repair-WindowsImage|Assert-DriversPreserved') 'Old rewritten pipeline remains'
 $embedded = @($assignments | Where-Object { $_.Left.Extent.Text -eq '$script:EmbeddedOscdimgBase64' })[0]
 . ([scriptblock]::Create($embedded.Extent.Text))
@@ -92,7 +90,7 @@ Assert ($text -notmatch 'Replace-GDebloatWinSxS|WinSxS_remove_|Convert-GDebloatN
 Assert ($text -match '\$mainOSDrive = \$WorkDirectory.TrimEnd') 'Micro drive-root workspace not restored'
 $originalSwap = ' Remove-Item -Path $mainOSDrive\scratchdir\Windows\WinSxS -Recurse -Force' + "`n`n" +
  'Rename-Item -Path "$mainOSDrive\scratchdir\Windows\WinSxS_edit" -NewName "WinSxS" -ErrorAction Stop'
-Assert (($text.Split(@($originalSwap), [StringSplitOptions]::None).Count - 1) -eq 1) 'Original Micro install WinSxS sequence changed'
+Assert (($text.Split(@($originalSwap), [StringSplitOptions]::None).Count - 1) -eq 2) 'Original Micro install/boot WinSxS sequences changed'
 # Exercise only the added automation helpers, using command doubles and temporary files.
 foreach ($name in @('Add-GDebloatDrivers', 'Enable-GDebloatLegacyFeatures', 'Copy-GDebloatGSecurityOverlay')) {
  . ([scriptblock]::Create(($nodes | Where-Object Name -eq $name).Extent.Text))
