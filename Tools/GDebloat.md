@@ -1,62 +1,53 @@
-# GDebloat image builder
+# GDebloat: adapted Micro 11 Barebones
 
-Run in elevated, 64-bit Windows PowerShell on Windows, using intact x64 Windows installation media. Use an NTFS staging volume with at least 20 GB free (more can be needed for large images). Work takes place in a unique child folder; existing work-folder contents are preserved.
+This version replaces the previous GDebloat removal pipeline with the **complete install-image file and package lists from the uploaded `TrimKit/Micro 11 Barebones.ps1`**: 7,777 file targets and 72 package patterns. It uses Micro's bulk `takeown`/`icacls` ownership pass and direct file deletion, with explicit exceptions for drivers, audio, Store/Xbox packages, shared runtimes, and installation infrastructure. The former per-file reparse-tag blocker is gone, so ordinary WIM/SIS-backed files are not rejected as unknown links.
 
-```powershell
-.\GDebloat.ps1 -SourceIso 'F:\' -ImageIndex 1 -SizeProfile Minimal `
-  -OutputIso 'C:\Downloads\Windows-Minimal.iso' -WorkDirectory 'C:\ISO_Build'
-```
+The uploaded Micro source SHA-256 is `46254253E4B18470221DFF828C7F1F5BBB0B4339C3369571AD7F4BBA9D22F20B`. This is an adapted builder, not a byte-for-byte copy: its destructive boot/setup and blind registry-deletion stages are intentionally excluded. No claim is made that Windows functionality has been verified or that it reaches Micro's original size.
 
-`Minimal` is now the default. It removes the explicit optional application list, including Photos, Calculator, Notepad, Terminal, Widgets, and promotional apps. It also removes Edge/WebView2 browser directories, selected optional capabilities, and selected disabled feature payloads. Audio drivers, codecs, Store/Xbox packages, shared AppX frameworks, and core servicing are retained. **Removing WebView2 can break Xbox or Microsoft sign-in screens and other applications.** Package preservation does not establish that those applications work.
+## Run
 
-The Micro-derived pass additionally removes installed/staged optional FOD package families through DISM (ISE, WMIC, Notepad/WordPad, legacy Media Player, Steps Recorder, Telnet/TFTP, OpenSSH, XPS, AD LDS, Work Folders, Simple TCP/IP, Projected File System, and the removable Edge WebView FOD where present). It uses exact package identities discovered in the target image. Non-removable/missing-assembly package errors are reported as retained; unexpected errors stop the build. It removes Help, wallpapers, system sound files, troubleshooting scripts, OneDrive setup executables, and regenerable .NET native-image caches. The .NET runtime and assemblies remain. Offline file removal accepts Windows WOF-compressed files. Symbolic links and junctions inside a selected payload are unlinked without following their destinations; redirected ancestor directories and unknown reparse types are rejected with diagnostics.
-
-The uploaded Micro script explicitly targets Intel E2f68/E1i68x64 and Realtek Rtcx21x64 Ethernet FOD packages and contains thousands of raw install/boot file deletions. GDebloat excludes those driver cuts and the raw deletion of .NET runtimes, core shell apps, component manifests/catalogs, and boot/setup providers. These are concrete differences from Micro, so it does not promise Micro's image size.
-
-WinRE is removed unless `-KeepWinRE` is supplied. Automatic Windows OS updates are disabled by policy unless `-AllowAutomaticUpdates` is supplied. The servicing and update backend remains installed for Store/Xbox dependencies; the builder does not remove Windows Update's component packages or guarantee that all manually initiated updates are blocked.
-
-Use `-SizeProfile Balanced` to retain the additional Minimal targets and browsers. Balanced also attempts to enable .NET 3.5 and DirectPlay. With Minimal, those additions require `-EnableLegacyGamingFeatures`; .NET 3.5 requires matching source payloads, optionally supplied with `-NetFx3Source`.
-
-## Reinstalling Edge and WebView2 later
-
-The build does not set policies blocking browser installation or remove Windows Installer, core servicing, or AppX frameworks. It includes `%SystemRoot%\Setup\Scripts\GDebloat-RestoreBrowsers.txt` in the installed OS.
-
-Download Microsoft's full x64 [Edge Enterprise installer](https://www.microsoft.com/edge/business/download) and [WebView2 Evergreen Standalone Runtime installer](https://developer.microsoft.com/microsoft-edge/webview2/). Install both as Administrator, reboot, then test Xbox sign-in. Edge and WebView2 are separate products; installing only Edge does not establish that the required WebView2 runtime is available. These installations do not require enabling automatic OS updates. Reinstallation and Xbox functionality have not been verified on a completed image in this Linux environment.
-
-## Image size and WinSxS
-
-The large `install_working.wim` in the staging folder is temporary. The final ISO uses **one edition in `sources\install.esd`, compressed with DISM `/Compress:recovery`**. It must not contain an additional install WIM/SWM. The build reports the final ESD's size and SHA-256 separately from the ISO's size and hash. A 1 GB installation image is a target, not a promised result; no size has been measured until an actual Windows build completes.
-
-DISM removes selected optional feature payloads and runs `/StartComponentCleanup /ResetBase` using Windows servicing metadata. It can remove superseded components but is not a dependency-based garbage collector for every manually removed app. Provisioned apps are removed through AppX servicing; Edge/WebView2 directories are removed explicitly. Core WinSxS manifests, catalogs, identity components, drivers, and shared payloads are retained. Disabling automatic updates does not make those files unnecessary for installed applications or setup.
-
-When pending servicing blocks cleanup with `0x800f0806`, the build records the skipped cleanup and retains pending operations. It does not delete `pending.xml` or revert pending setup changes. It supplies this helper **inside the installed Windows image**:
-
-```powershell
-# After installation finishes and Windows has rebooted, run elevated:
-& "$env:SystemRoot\Setup\Scripts\GDebloat-ComponentCleanup.ps1"
-```
-
-This finishes installed-system cleanup when servicing permits it. It does **not** shrink the already-created ISO. `/ResetBase` makes superseded updates non-uninstallable. If the ISO itself needs further reduction after pending actions, a separately validated install/reboot/recapture workflow is needed; the builder does not claim to implement or test that workflow.
-
-## USB setup compatibility
-
-Every boot.wim index and its driver/component payload is retained. Driver inventories are compared before and after servicing; losing a source driver stops the build. The report lists Intel/Realtek Net-class packages (which can include Wi-Fi as well as Ethernet). Drivers absent from the original image must be supplied separately; an inventory match does not prove a particular network adapter works. Setup files and boot sectors are preserved. The copied boot WIM's read-only attribute is cleared before write mounting; the source media is untouched. Overlays cannot replace files under `boot`, `efi`, or `sources`, except `sources\$OEM$` payloads. An overlay cannot supply another installation image.
-
-For hardware that needs Intel VMD/RST, AMD RAID, or another OEM storage driver, supply extracted **signed INF packages appropriate for that hardware**:
+Use elevated **64-bit Windows PowerShell**, intact x64 Windows installation media, and an NTFS staging volume with at least 20 GB free. The script prompts for the source and edition if omitted. It uses a fresh work subdirectory and never clears the supplied parent directory.
 
 ```powershell
 .\GDebloat.ps1 -SourceIso 'F:\' -ImageIndex 1 `
-  -DriverDirectory 'E:\Drivers\Storage'
+  -OutputIso 'E:\Test\GDebloat-Micro.iso' -WorkDirectory 'C:\ISO_Build'
 ```
 
-Drivers are added to both the installed OS image and every source boot image. Signature enforcement is not bypassed. Preserving source drivers cannot guarantee that every storage controller is supported.
+`SourceIso` also accepts a mounted media folder or ISO path. Choose an edition present in your source. An existing output ISO is never overwritten; choose another filename or remove the old output yourself. `-SizeProfile Minimal` is accepted for compatibility. The old Balanced profile, GSecurity overlays, and legacy feature-injection options are not part of this replacement.
 
-Use Rufus to create the USB and check its completion status. If `install.esd` is 4 GiB or larger, use NTFS/UEFI:NTFS; copying it directly to FAT32 cannot work. Before deployment, boot the result on the target hardware and test disk visibility, installation, audio output, Store installation, and Xbox sign-in/game launch. Test the original source ISO on the same hardware if a media-driver message occurs.
+**Oscdimg is embedded** in the single script. It extracts into the isolated work directory and verifies SHA-256 `F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD` before use. An explicit `-OscdimgPath`, local executable, or installed ADK executable can still be selected. No runtime download is required.
 
-## Validation
+## What differs from Micro
+
+- **Boot/setup:** Micro's boot-index deletion, boot driver/file removal, boot WinSxS pruning, and setup-media file cleanup are omitted. The source `boot.wim` is copied and checked for byte equality. Without optional driver injection it remains unchanged. This preserves source compatibility; it cannot supply drivers absent from the source.
+- **Drivers:** install-image DriverStore, INF files, and driver binaries are protected. Intel/Realtek Ethernet and Wi-Fi FOD packages are excluded from Micro's package-removal patterns. Source driver inventories are compared before and after removals; loss of a source driver stops export. The report lists detected Intel/Realtek Net-class packages, including Ethernet and potentially Wi-Fi. That list is not a hardware compatibility test.
+- **Audio/Store/Xbox:** audio services/binaries, Store/Xbox provisioned packages, codecs, shared AppX frameworks, .NET runtimes, installer files, and core shell/identity dependencies have protected exceptions. All other provisioned applications are candidates for removal, as in Micro. Broad registry garbage-collection and service-registration deletion are excluded. Preservation is intended to support these features but does not establish that they work.
+- **WinSxS:** direct payload trimming replaces Micro's near-empty component-store whitelist. Component directories are retained if they contain files with multiple hardlinks, match protected runtime/device families, or have unknown link state. Other component payload directories can be deleted. Metadata directories and root files, including pending operations, remain. This ties trimming to what remains installed but is **not a complete dependency-graph analysis**. It can still leave CBS servicing inconsistent. Native link counts are queried in-process rather than launching `fsutil` for every file.
+- **Updates:** automatic OS updates are disabled by policy; the servicing/delivery backend is retained for Store/Xbox. Micro's fake WSUS server and disabling of `wuauserv` are omitted. Manual OS updates are not guaranteed to be blocked.
+- **Edge/WebView2/WinRE:** removed. No empty recovery-WIM placeholder is created. Browser restoration instructions are included at `%SystemRoot%\Setup\Scripts\GDebloat-RestoreBrowsers.txt`. Windows Installer/framework files are protected so later installation can be attempted with Microsoft's full Edge installer and WebView2 Evergreen Standalone Runtime. Restoration and Xbox sign-in still require testing on the finished image.
+- **Failures:** optional app/package/file removals are reported as retained or partial instead of falsely counted as successes. Mounting, image export, driver loss, protected AppX loss, and ISO creation remain fatal. Failed builds retain the transcript and work directory.
+
+The script does not inherit unrelated Micro changes that disable UAC, the pagefile, or CPU security mitigations. It does not guarantee Windows Update/servicing support after manual component stripping, or that missing dependencies can be restored without original media/rebuilding.
+
+## OEM drivers and USB
+
+If the source lacks your hardware's driver, supply the extracted **signed INF packages**:
+
+```powershell
+.\GDebloat.ps1 -SourceIso 'F:\' -ImageIndex 1 `
+  -OutputIso 'E:\Test\GDebloat-Micro.iso' -DriverDirectory 'E:\Drivers'
+```
+
+This adds the supplied drivers to the installed OS image and every original boot image, preserving original driver inventories. Unsigned-driver enforcement is not bypassed. Drivers must match the target hardware; random driver bundles are unnecessary.
+
+Use Rufus to create the USB and check its completion status. An `install.esd` at or above 4 GiB cannot be copied directly to FAT32; use NTFS/UEFI:NTFS. Test disk detection and installation on the target hardware. If a media-driver error appears, compare with the original ISO on the same USB and hardware.
+
+## Size and validation
+
+The large working WIM is temporary. Final media contains **one recovery-compressed `sources\install.esd`**, not that working WIM. The report records final ESD/ISO sizes and SHA-256 values, the number of eligible Micro targets, component removals, and individual removal outcomes. **One GB is a target, not a verified or guaranteed result.** Retained drivers, active components, runtimes, and installer metadata impose a size cost.
 
 ```powershell
 pwsh -NoProfile -File .\tests\GDebloat.Tests.ps1
 ```
 
-These checks exercise parsing, overlay rejection before copying, clearing read-only without changing bytes, native error propagation, cleanup/health handling, profile protections, browser-removal isolation, and boot driver routing. Command doubles cover DISM flow; these tests do not perform a Windows image build or establish hardware, Store, Xbox, or audio functionality. Actual builds must report `Healthy` from the DISM image health scan before export.
+Checks cover parsing, the complete Micro target lists, protection filters, metadata-helper compilation, simulated live/retired component trimming, disposable-file removal, driver-loss detection, native errors, and the embedded executable checksum. Native hardlink queries and image servicing require Windows and are not validated by these Linux checks. Boot the finished USB and test installation, audio, Store downloads, Xbox sign-in/game launch, and later Edge/WebView2 installation before relying on the image.
