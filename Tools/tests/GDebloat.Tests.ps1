@@ -76,6 +76,21 @@ $sha = [Security.Cryptography.SHA256]::Create()
 try { $hash = [BitConverter]::ToString($sha.ComputeHash([Convert]::FromBase64String($script:EmbeddedOscdimgBase64))).Replace('-', '') }
 finally { $sha.Dispose() }
 Assert ($hash -eq 'F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD') 'Embedded oscdimg changed'
+. ([scriptblock]::Create(($nodes | Where-Object Name -eq 'Replace-GDebloatWinSxS').Extent.Text))
+$swapFixture = Join-Path ([IO.Path]::GetTempPath()) ('gdebloat-swap-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $swapFixture 'WinSxS'), (Join-Path $swapFixture 'WinSxS_edit') -Force | Out-Null
+try {
+ [IO.File]::WriteAllText((Join-Path $swapFixture 'WinSxS/old.txt'), 'old')
+ [IO.File]::WriteAllText((Join-Path $swapFixture 'WinSxS_edit/kept.txt'), 'kept')
+ Replace-GDebloatWinSxS $swapFixture
+ Assert (Test-Path (Join-Path $swapFixture 'WinSxS/kept.txt')) 'Prepared WinSxS was not installed'
+ Assert (-not (Test-Path (Join-Path $swapFixture 'WinSxS/old.txt'))) 'Old WinSxS payload was retained'
+ Assert (@(Get-ChildItem $swapFixture -Directory).Count -eq 1) 'Backup included in resulting image'
+ $caught = $null
+ try { Replace-GDebloatWinSxS $swapFixture } catch { $caught = $_ }
+ Assert ($null -ne $caught) 'Missing replacement unexpectedly succeeded'
+ Assert (Test-Path (Join-Path $swapFixture 'WinSxS/kept.txt')) 'Original tree not restored on failed swap'
+} finally { Remove-Item -LiteralPath $swapFixture -Recurse -Force }
 # Exercise only the added automation helpers, using command doubles and temporary files.
 foreach ($name in @('Add-GDebloatDrivers', 'Enable-GDebloatLegacyFeatures', 'Copy-GDebloatGSecurityOverlay')) {
  . ([scriptblock]::Create(($nodes | Where-Object Name -eq $name).Extent.Text))

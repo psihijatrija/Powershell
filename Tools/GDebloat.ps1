@@ -39,6 +39,38 @@ if (Test-Path -LiteralPath $OutputIso) { throw "Output already exists: $OutputIs
 # Console presentation: section headers + completion footers only; section bodies are silent.
 # Automatically set a usable execution policy when required.
 # No yes/no prompt is shown.
+function Replace-GDebloatWinSxS([string]$WindowsDirectory) {
+ $original = Join-Path $WindowsDirectory 'WinSxS'
+ $replacement = Join-Path $WindowsDirectory 'WinSxS_edit'
+ $backupName = 'WinSxS_remove_' + [guid]::NewGuid().ToString('N')
+ $backup = Join-Path $WindowsDirectory $backupName
+ # Rename the old tree first: a partial recursive deletion must not occupy
+ # the destination name and prevent Micro's prepared tree from being installed.
+ Rename-Item -LiteralPath $original -NewName $backupName -ErrorAction Stop
+ try {
+  Rename-Item -LiteralPath $replacement -NewName 'WinSxS' -ErrorAction Stop
+ } catch {
+  $replacementError = $_
+  Rename-Item -LiteralPath $backup -NewName 'WinSxS' -ErrorAction Stop
+  throw $replacementError
+ }
+ try {
+  Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop
+ } catch {
+  # Windows PowerShell's provider can fail on WIM/SIS-backed files. Native RD
+  # handles this tree without changing Micro's component-selection technique.
+  $previousPreference = $ErrorActionPreference
+  try {
+   $ErrorActionPreference = 'Continue'
+   $cleanupOutput = @(& "$env:SystemRoot\System32\cmd.exe" /d /c "rd /s /q `"$backup`"" 2>&1)
+   $cleanupExit = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $previousPreference }
+  if ($cleanupExit -ne 0 -or (Test-Path -LiteralPath $backup)) {
+   throw "WinSxS replacement installed, but old tree could not be deleted: $backup. $($cleanupOutput -join ' ')"
+  }
+ }
+}
+
 function Select-WimImageIndex {
  param(
  [Parameter(Mandatory = $true)]
@@ -9262,11 +9294,9 @@ elseif ($architecture -eq "arm64") {
 
 Get-ChildItem -LiteralPath $sourceDirectory -File -Force | Copy-Item -Destination $destinationDirectory -Force
 Write-Host "Deleting WinSxS. This may take a while..."
- Remove-Item -Path $mainOSDrive\scratchdir\Windows\WinSxS -Recurse -Force
-
-Rename-Item -Path "$mainOSDrive\scratchdir\Windows\WinSxS_edit" -NewName "WinSxS" -ErrorAction Stop
+Replace-GDebloatWinSxS -WindowsDirectory (Join-Path $mainOSDrive 'scratchdir\Windows')
 Write-Host "Complete!"
-} *> $null
+}
 Write-Host 'INSTALL.WIM WinSxS reduction Completed...' -ForegroundColor Green
 
 
@@ -11437,11 +11467,9 @@ elseif ($architecture -eq "arm64") {
 
 Get-ChildItem -LiteralPath $sourceDirectory -File -Force | Copy-Item -Destination $destinationDirectory -Force
 Write-Host "Deleting WinSxS. This may take a while..."
- Remove-Item -Path $mainOSDrive\scratchdir\Windows\WinSxS -Recurse -Force
-
-Rename-Item -Path "$mainOSDrive\scratchdir\Windows\WinSxS_edit" -NewName "WinSxS" -ErrorAction Stop
+Replace-GDebloatWinSxS -WindowsDirectory (Join-Path $mainOSDrive 'scratchdir\Windows')
 Write-Host "Complete!"
-} *> $null
+}
 Write-Host 'BOOT.WIM WinSxS cleanup Completed...' -ForegroundColor Green
 
 
