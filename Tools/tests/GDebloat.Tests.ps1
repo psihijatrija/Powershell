@@ -78,25 +78,11 @@ $sha = [Security.Cryptography.SHA256]::Create()
 try { $hash = [BitConverter]::ToString($sha.ComputeHash([Convert]::FromBase64String($script:EmbeddedOscdimgBase64))).Replace('-', '') }
 finally { $sha.Dispose() }
 Assert ($hash -eq 'F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD') 'Embedded oscdimg changed'
-. ([scriptblock]::Create(($nodes | Where-Object Name -eq 'Convert-GDebloatNativePath').Extent.Text))
-Assert ((Convert-GDebloatNativePath 'C:\long\path') -eq '\\?\C:\long\path') 'Extended drive path incorrect'
-Assert ((Convert-GDebloatNativePath '\\server\share\path') -eq '\\?\UNC\server\share\path') 'Extended UNC path incorrect'
-Assert ((Convert-GDebloatNativePath '\\?\C:\already') -eq '\\?\C:\already') 'Extended prefix duplicated'
-. ([scriptblock]::Create(($nodes | Where-Object Name -eq 'Replace-GDebloatWinSxS').Extent.Text))
-$swapFixture = Join-Path ([IO.Path]::GetTempPath()) ('gdebloat-swap-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path (Join-Path $swapFixture 'WinSxS'), (Join-Path $swapFixture 'WinSxS_edit') -Force | Out-Null
-try {
- [IO.File]::WriteAllText((Join-Path $swapFixture 'WinSxS/old.txt'), 'old')
- [IO.File]::WriteAllText((Join-Path $swapFixture 'WinSxS_edit/kept.txt'), 'kept')
- Replace-GDebloatWinSxS $swapFixture
- Assert (Test-Path (Join-Path $swapFixture 'WinSxS/kept.txt')) 'Prepared WinSxS was not installed'
- Assert (-not (Test-Path (Join-Path $swapFixture 'WinSxS/old.txt'))) 'Old WinSxS payload was retained'
- Assert (@(Get-ChildItem $swapFixture -Directory).Count -eq 1) 'Backup included in resulting image'
- $caught = $null
- try { Replace-GDebloatWinSxS $swapFixture } catch { $caught = $_ }
- Assert ($null -ne $caught) 'Missing replacement unexpectedly succeeded'
- Assert (Test-Path (Join-Path $swapFixture 'WinSxS/kept.txt')) 'Original tree not restored on failed swap'
-} finally { Remove-Item -LiteralPath $swapFixture -Recurse -Force }
+Assert ($text -notmatch 'Replace-GDebloatWinSxS|WinSxS_remove_|Convert-GDebloatNativePath|GB.*Substring') 'Custom WinSxS/work-path mechanics remain'
+Assert ($text -match '\$mainOSDrive = \$WorkDirectory.TrimEnd') 'Micro drive-root workspace not restored'
+$originalSwap = ' Remove-Item -Path $mainOSDrive\scratchdir\Windows\WinSxS -Recurse -Force' + "`n`n" +
+ 'Rename-Item -Path "$mainOSDrive\scratchdir\Windows\WinSxS_edit" -NewName "WinSxS" -ErrorAction Stop'
+Assert (($text.Split(@($originalSwap), [StringSplitOptions]::None).Count - 1) -eq 2) 'Original Micro WinSxS sequence not restored for both images'
 # Exercise only the added automation helpers, using command doubles and temporary files.
 foreach ($name in @('Add-GDebloatDrivers', 'Enable-GDebloatLegacyFeatures', 'Copy-GDebloatGSecurityOverlay')) {
  . ([scriptblock]::Create(($nodes | Where-Object Name -eq $name).Extent.Text))

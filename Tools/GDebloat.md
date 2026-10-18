@@ -7,14 +7,14 @@ The source was `TrimKit/Micro 11 Barebones.ps1`, SHA-256 `46254253E4B18470221DFF
 ## Changes to Micro
 
 - Renamed its branding and staging folder to **GDebloat**.
-- Embedded **oscdimg.exe**. It extracts locally and verifies SHA-256 `F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD`; it does not download the tool. `-OscdimgPath` can select an existing executable.
+- Embedded **oscdimg.exe**. It extracts into a unique temporary executable and verifies SHA-256 `F5129F313ED7EB46F2677CF522E64264A225F226307ED0DDB52BB14C46E7CFDD`; it does not download the tool. `-OscdimgPath` can select an existing executable.
 - Excluded Ethernet/Wi-Fi driver packages and driver/INF paths from the main deletion lists. Intel/Realtek Ethernet drivers already present in the source are retained. Micro's separate install-image printer/scanner/smartcard/tape-driver pruning remains.
 - Added keep prefixes for Store, Xbox/Gaming, shared AppX runtimes and media codecs. Added audio, installer, .NET, core shell and sign-in exceptions to the file lists. AppX residual-folder removal uses only successfully removed packages.
 - Retained **Micro's WinSxS copy/delete method**, expanded with driver/audio/Store/Xbox/runtime/installer keep patterns. Manifests/catalogs and root metadata files are retained. This is still an aggressive whitelist, not a verified dependency closure.
 - Kept Micro's boot-image and setup-media debloat enabled by default. Boot driver, hive/profile, setup engine/provider and relevant resource paths are excluded. Every boot index is retained; Micro's index-1 deletion is removed and the final rebuild exports all indexes. The normal Microsoft Setup image remains the bootable image.
 - Removed execution-policy changes, install policy/tweak stages, and offline registry mutation/cleanup/compaction stages. Boot hives are not loaded, edited, compacted or cleaned. Unused original registry helper definitions remain. No fake WSUS, UAC, pagefile, CPU-mitigation, or other policy tweaks are applied. Micro's update-file removal remains; automatic updates are not separately disabled by a new policy.
 - Removed the empty WinRE placeholder. Edge, WebView2 and recovery removals remain.
-- Isolated Micro's work under a fresh, short `GBxxxxxxxx` child of `-WorkDirectory` (default: the Windows system-drive root); existing parent-directory contents are not cleared. Added optional source-drive/index/output parameters and removed the completion prompt. Existing output files are not overwritten.
+- Restored Micro's original drive-root workspace: `C:\scratchdir` and `C:\GDebloat` by default. `-WorkDirectory` can select another drive root, such as `D:\`. An existing scratch/media directory stops startup rather than being overwritten. Added optional source-drive/index/output parameters and removed the completion prompt. Existing output files are not overwritten.
 
 ## Run
 
@@ -22,10 +22,10 @@ Use elevated **64-bit Windows PowerShell** on Windows. The source parameter foll
 
 ```powershell
 .\GDebloat.ps1 -SourceIso 'F:\' -ImageIndex 1 `
-  -OutputIso 'E:\Test\GDebloat.iso' -WorkDirectory 'C:\ISO_Build'
+  -OutputIso 'E:\Test\GDebloat.iso' -WorkDirectory 'C:\'
 ```
 
-Running `.\GDebloat.ps1` prompts for the drive and edition. The old `SizeProfile` option is not part of this literal Micro adaptation. Driver and GSecurity inclusion are automatic as described below. The output defaults to `GDebloat.iso` beside the script. Logs remain in the isolated work folder. The short default path avoids Windows PowerShell 5.1 path-length failures. WinSxS replacement uses a short temporary name; native cleanup uses the extended `\\?\` path syntax.
+Running `.\GDebloat.ps1` prompts for the drive and edition. The old `SizeProfile` option is not part of this literal Micro adaptation. Driver and GSecurity inclusion are automatic as described below. The output defaults to `GDebloat.iso` beside the script. Transcripts are saved beside the script with unique names. The original short scratch path and original WinSxS deletion/rename sequence are restored: `WinSxS_edit` is prepared, the original `WinSxS` is deleted, and the prepared folder is renamed. The custom backup-folder swap, native RD fallback and extended-path helpers have been removed.
 
 Use the source media or the auto-detected `Drivers` folder for the hardware drivers you need. Preserving drivers does not add Intel VMD/RST, RAID or Ethernet drivers absent from the source. Boot and install the original media on the same hardware when diagnosing a media-driver message.
 
