@@ -707,6 +707,11 @@ if (-not ($isAmd64 -or $isArm64 -or $isX86)) {
 function Test-Micro11CleanupPathForArchitecture {
     param([Parameter(Mandatory=$true)][string]$Path)
 
+    # WinPE must retain its full runtime/registry/driver payload. Micro's
+    # install-image reductions do not imply those same files are optional here.
+    if ($gDebloatBootPhase) {
+        return ($Path -match '(?i)\\Windows\\(Help|Logs|Media|Web)(\\|$)')
+    }
     if ($isArm64 -and $Path -match '(?i)(?:_amd64_|\\GAC_64\\|\\Framework64\\)') { return $false }
     if ($isAmd64 -and $Path -match '(?i)(?:_arm64_|\\GAC_Arm64\\|\\FrameworkArm64\\)') { return $false }
     # GDebloat exceptions to the original Micro deletion lists.
@@ -9417,34 +9422,6 @@ if ($LASTEXITCODE -ne 0) {
 
 Add-GDebloatDrivers -MountPath $scratchDir
 
-Write-Host "Taking ownership of the Program Files folder. This might take a while..."
-& 'takeown' '/f' "$mainOSDrive\scratchDir\Program Files" '/A' '/R' '/D' 'Y' >$null 2>&1
-& 'icacls' "$mainOSDrive\scratchDir\Program Files" '/grant' "$($adminGroup.Value):(F)" '/T' '/C' '/Q' >$null 2>&1
-
-$bootProgramFilesX86Path = "$mainOSDrive\scratchdir\Program Files (x86)"
-if (Test-Path -LiteralPath $bootProgramFilesX86Path -PathType Container) {
-    Write-Host "Taking ownership of the Program Files (x86) folder. This might take a while..."
-    & 'takeown' '/f' $bootProgramFilesX86Path '/A' '/R' '/D' 'Y' >$null 2>&1
-    & 'icacls' $bootProgramFilesX86Path '/grant' "$($adminGroup.Value):(F)" '/T' '/C' '/Q' >$null 2>&1
-}
-
-Write-Host "Taking ownership of the ProgramData folder. This might take a while..."
-& 'takeown' '/f' "$mainOSDrive\scratchDir\ProgramData" '/A' '/R' '/D' 'Y' >$null 2>&1
-& 'icacls' "$mainOSDrive\scratchDir\ProgramData" '/grant' "$($adminGroup.Value):(F)" '/T' '/C' '/Q' >$null 2>&1
-
-Write-Host "Taking ownership of the Sources folder. This might take a while..."
-& 'takeown' '/f' "$mainOSDrive\scratchDir\sources" '/A' '/R' '/D' 'Y' >$null 2>&1
-& 'icacls' "$mainOSDrive\scratchDir\sources" '/grant' "$($adminGroup.Value):(F)" '/T' '/C' '/Q' >$null 2>&1
-
-Write-Host "Taking ownership of the Users folder. This might take a while..."
-& 'takeown' '/f' "$mainOSDrive\scratchDir\Users" '/A' '/R' '/D' 'Y' >$null 2>&1
-& 'icacls' "$mainOSDrive\scratchDir\Users" '/grant' "$($adminGroup.Value):(F)" '/T' '/C' '/Q' >$null 2>&1
-
-
-Write-Host "Taking ownership of the Windows folder. This might take a while..."
-& 'takeown' '/f' "$mainOSDrive\scratchdir\Windows" '/A' '/R' '/D' 'Y' >$null 2>&1
-& 'icacls' "$mainOSDrive\scratchdir\Windows" '/grant' "$($adminGroup.Value):(F)" '/T' '/C' '/Q' >$null 2>&1
-
 Write-Host "Mounting complete! Performing Boot Wim Agressive Manual Deletions..."
 } *> $null
 Write-Host 'BOOT.WIM mount and preparation Completed...' -ForegroundColor Green
@@ -11328,6 +11305,12 @@ $bootArchitectureAwareRemovalPaths = @(
     "$scratchDir\Windows\System32\en-US\wbengine.exe.mui"
 )
 $bootArchitectureAwareRemovalPaths = @($bootArchitectureAwareRemovalPaths | Where-Object { Test-Micro11CleanupPathForArchitecture -Path $_ })
+foreach ($bootAncillaryPath in $bootArchitectureAwareRemovalPaths) {
+ if (Test-Path -LiteralPath $bootAncillaryPath) {
+  & takeown.exe /F $bootAncillaryPath /A /R /D Y >$null 2>&1
+  & icacls.exe $bootAncillaryPath /grant "$($adminGroup.Value):(F)" /T /C /Q /L >$null 2>&1
+ }
+}
 Remove-Item -Path $bootArchitectureAwareRemovalPaths -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "Removal complete!"
 } *> $null
@@ -11340,113 +11323,13 @@ Write-Host ""
 Write-Host "============================================================================" -ForegroundColor Gray
 Write-Host "BOOT.WIM - WINSXS CLEANUP" -ForegroundColor Green
 Write-Host "  [Stage 1] 24.1 Analyze BOOT.WIM WinSxS" -ForegroundColor Green
-Write-Host "  [Stage 2] 24.2 Remove targeted component payloads" -ForegroundColor Green
-Write-Host "  [Stage 3] 24.3 Verify WinSxS cleanup" -ForegroundColor Yellow
+Write-Host "  [Stage 2] 24.2 Retain Windows PE component payloads" -ForegroundColor Green
+Write-Host "  [Stage 3] 24.3 Preserve boot runtime dependencies" -ForegroundColor Yellow
 Write-Host "============================================================================" -ForegroundColor Gray
 . {
-Write-Host "Taking ownership of the WinSxS folder. This might take a while..."
-& 'takeown' '/f' "$mainOSDrive\scratchdir\Windows\WinSxS" '/A' '/R' '/D' 'Y' >$null 2>&1
-& 'icacls' "$mainOSDrive\scratchdir\Windows\WinSxS" '/grant' "$($adminGroup.Value):(F)" '/T' '/C' '/Q' >$null 2>&1
-Write-Host "Complete!"
-Write-Host "Preparing Boot WinSxS...." >$null
-$folderPath = Join-Path -Path $mainOSDrive -ChildPath "\scratchdir\Windows\WinSxS_edit"
-$sourceDirectory = "$mainOSDrive\scratchdir\Windows\WinSxS"
-$destinationDirectory = "$mainOSDrive\scratchdir\Windows\WinSxS_edit"
-
-New-Item -Path $folderPath -ItemType Directory -Force | Out-Null
-
-if ($architecture -eq "amd64") {
- $dirsToCopy = @(
- "amd64_microsoft.windows.common-controls_6595b64144ccf1df_*",
- "amd64_microsoft.windows.gdiplus_6595b64144ccf1df_*"
- )
-
-
- # GDebloat: additional keep patterns, using Micro's same copy-based method.
- $dirsToCopy += @('Manifests', 'Catalogs', 'SettingsManifests', 'Temp', 'Backup',
- '*directplay*', '*legacycomponents*', '*netfx*', '*dotnet*', '*net-framework*', '*clr*', '*mscore*', '*audio*', '*mmdev*', '*mmcss*',
- '*xbox*', '*gaming*', '*store*', '*appx*', '*appmodel*', '*licens*', '*clip*',
- '*installer*', '*msi*', '*windowsapp*', '*driver*', '*ethernet*', '*realtek*', '*intel*',
- '*network*', '*net*', '*ndis*', '*tcpip*', '*winsock*', '*usb*', '*stor*', '*nvme*', '*ahci*', '*vmbus*')
-
- # Copy each directory
-
-
- foreach ($dir in $dirsToCopy) {
- $sourceDirs = Get-ChildItem -Path $sourceDirectory -Filter $dir -Directory
- foreach ($sourceDir in $sourceDirs) {
- $destDir = Join-Path -Path $destinationDirectory -ChildPath $sourceDir.Name
-  # Per-directory WinSxS copy output suppressed for a quieter/faster console.
- Copy-Item -Path $sourceDir.FullName -Destination $destDir -Recurse -Force
- }
- }
-
- # Copy only required manifests
- $manifestPath = Join-Path $sourceDirectory "Manifests"
- $destPath = Join-Path $destinationDirectory "Manifests"
- New-Item -ItemType Directory -Path $destPath -Force | Out-Null
-
- $keep = @(
- "amd64_microsoft.windows.i..utomation.proxystub_*","amd64_microsoft.windows.isolationautomation_*","amd64_microsoft-windows-international-core_*","amd64_microsoft.windows.common-controls_*","amd64_microsoft.windows.c..-controls.resources_*_en-us_*","amd64_microsoft.windows.gdiplus_*","amd64_microsoft.windows.systemcompatible_*","amd64_microsoft-windows-servicingstack_*","x86_microsoft-windows-servicingstack_*"
- )
-
- foreach ($pattern in $keep) {
- Get-ChildItem $manifestPath -Filter $pattern -File -ErrorAction SilentlyContinue | Copy-Item -Destination $destPath -Force
- }
-}
-elseif ($architecture -eq "arm64") {
- $dirsToCopy = @(
- "arm64_microsoft.windows.common-controls_6595b64144ccf1df_*",
- "arm64_microsoft.windows.gdiplus_6595b64144ccf1df_*"
- )
-
-
- # GDebloat: additional keep patterns, using Micro's same copy-based method.
- $dirsToCopy += @('Manifests', 'Catalogs', 'SettingsManifests', 'Temp', 'Backup',
- '*directplay*', '*legacycomponents*', '*netfx*', '*dotnet*', '*net-framework*', '*clr*', '*mscore*', '*audio*', '*mmdev*', '*mmcss*',
- '*xbox*', '*gaming*', '*store*', '*appx*', '*appmodel*', '*licens*', '*clip*',
- '*installer*', '*msi*', '*windowsapp*', '*driver*', '*ethernet*', '*realtek*', '*intel*',
- '*network*', '*net*', '*ndis*', '*tcpip*', '*winsock*', '*usb*', '*stor*', '*nvme*', '*ahci*', '*vmbus*')
-
- foreach ($dir in $dirsToCopy) {
- $sourceDirs = Get-ChildItem -Path $sourceDirectory -Filter $dir -Directory -ErrorAction SilentlyContinue
- foreach ($sourceDir in $sourceDirs) {
- $destDir = Join-Path -Path $destinationDirectory -ChildPath $sourceDir.Name
-  # Per-directory WinSxS copy output suppressed for a quieter/faster console.
- Copy-Item -Path $sourceDir.FullName -Destination $destDir -Recurse -Force
- }
- }
-
- $manifestPath = Join-Path $sourceDirectory "Manifests"
- $destPath = Join-Path $destinationDirectory "Manifests"
- New-Item -ItemType Directory -Path $destPath -Force | Out-Null
-
- $keep = @(
- "arm64_microsoft.windows.i..utomation.proxystub_*",
- "arm64_microsoft.windows.isolationautomation_*",
- "arm64_microsoft-windows-international-core_*",
- "arm64_microsoft.windows.common-controls_*",
- "arm64_microsoft.windows.c..-controls.resources_*_en-us_*",
- "arm64_microsoft.windows.gdiplus_*",
- "arm64_microsoft.windows.systemcompatible_*",
- "arm64_microsoft-windows-servicingstack_*",
- "x86_microsoft-windows-servicingstack_*"
- )
-
- foreach ($pattern in $keep) {
- Get-ChildItem $manifestPath -Filter $pattern -File -ErrorAction SilentlyContinue |
- Copy-Item -Destination $destPath -Force
- }
-}
-
-Get-ChildItem -LiteralPath $sourceDirectory -File -Force | Copy-Item -Destination $destinationDirectory -Force
-Write-Host "Deleting WinSxS. This may take a while..."
- Remove-Item -Path $mainOSDrive\scratchdir\Windows\WinSxS -Recurse -Force
-
-Rename-Item -Path "$mainOSDrive\scratchdir\Windows\WinSxS_edit" -NewName "WinSxS" -ErrorAction Stop
-Write-Host "Complete!"
+Write-Host 'Boot WinSxS retained intact: required for Windows PE setup startup.' -ForegroundColor Green
 } *> $null
-Write-Host 'BOOT.WIM WinSxS cleanup Completed...' -ForegroundColor Green
+Write-Host 'BOOT.WIM WinSxS preservation Completed...' -ForegroundColor Green
 
 
 
@@ -11779,7 +11662,7 @@ $gDebloatMediaRemovalPaths = @(
     "$mainOSDrive\GDebloat\sources\wpx.dll"
 )
 $gDebloatMediaRemovalPaths = @($gDebloatMediaRemovalPaths | Where-Object {
- $_ -notmatch '(?i)\.(dll|exe|sys|inf|cat|hiv|wim|esd|swm|bin|ttf)$' -and
+ $_ -notmatch '(?i)\.(dll|exe|sys|inf|cat|hiv|wim|esd|swm|bin|ttf|ini|dat|xml|mui|sdb)$' -and
  $_ -notmatch '(?i)(hwcompat|hwexclude|appraiser|winsetup|wimprovider|imagingprovider|vhdprovider|dismapi)'
 })
 Remove-Item -Path $gDebloatMediaRemovalPaths -Recurse -Force -ErrorAction SilentlyContinue
