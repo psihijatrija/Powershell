@@ -15,18 +15,18 @@ foreach ($parameter in $ast.ParamBlock.Parameters) {
 $sourceText = [IO.File]::ReadAllText($path)
 $start = $sourceText.IndexOf('# Initialize runtime paths after parameter binding')
 $end = $sourceText.IndexOf('# End runtime path initialization.', $start)
-$initializePaths = [scriptblock]::Create($sourceText.Substring($start, $end - $start))
-$savedScriptRoot = $PSScriptRoot
+$pathFixture = Join-Path ([IO.Path]::GetTempPath()) ('gdebloat-path-' + [guid]::NewGuid().ToString('N') + '.ps1')
+$fixtureText = 'param([string]$OutputIso, [string]$WorkDirectory)' + "`n" +
+ $sourceText.Substring($start, $end - $start) + "`n" +
+ '[pscustomobject]@{ Output = $OutputIso; Work = $WorkDirectory; Root = $PSScriptRoot }'
+[IO.File]::WriteAllText($pathFixture, $fixtureText)
 try {
- $PSScriptRoot = [IO.Path]::GetTempPath()
- $OutputIso = $null; $WorkDirectory = $null
- . $initializePaths
- Assert ($OutputIso -eq (Join-Path $PSScriptRoot 'GDebloat.iso')) 'Default output path incorrect'
- Assert (-not [string]::IsNullOrWhiteSpace($WorkDirectory)) 'Default work path missing'
- $OutputIso = 'chosen.iso'; $WorkDirectory = 'chosen-work'
- . $initializePaths
- Assert ($OutputIso -eq 'chosen.iso' -and $WorkDirectory -eq 'chosen-work') 'Explicit paths overridden'
-} finally { $PSScriptRoot = $savedScriptRoot }
+ $defaults = & $pathFixture
+ Assert ($defaults.Output -eq (Join-Path $defaults.Root 'GDebloat.iso')) 'Default output path incorrect'
+ Assert (-not [string]::IsNullOrWhiteSpace($defaults.Work)) 'Default work path missing'
+ $explicit = & $pathFixture -OutputIso 'chosen.iso' -WorkDirectory 'chosen-work'
+ Assert ($explicit.Output -eq 'chosen.iso' -and $explicit.Work -eq 'chosen-work') 'Explicit paths overridden'
+} finally { Remove-Item -LiteralPath $pathFixture -Force }
 $nodes = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)
 $filter = $nodes | Where-Object Name -eq 'Test-Micro11CleanupPathForArchitecture'
 . ([scriptblock]::Create($filter.Extent.Text))
