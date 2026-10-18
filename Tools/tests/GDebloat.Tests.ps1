@@ -10,7 +10,7 @@ if ($errors.Count) { throw ($errors -join "`n") }
 $functions = $ast.FindAll({ param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
 }, $false)
-foreach ($name in @('Test-AllowedOverlayPath', 'Set-StagedImageWritable', 'Invoke-Native', 'Invoke-Dism', 'Copy-IsoOverlayInternal', 'Write-Utf8', 'Write-Step', 'Test-KeptApp', 'Remove-OfflineBrowserPayload', 'Get-OfflineDriverInventory', 'Assert-DriversPreserved')) {
+foreach ($name in @('Test-AllowedOverlayPath', 'Set-StagedImageWritable', 'Invoke-Native', 'Invoke-Dism', 'Copy-IsoOverlayInternal', 'Write-Utf8', 'Write-Step', 'Test-KeptApp', 'Remove-OfflineBrowserPayload', 'Get-OfflineDriverInventory', 'Assert-DriversPreserved', 'Get-OfflineReparseTag', 'Prepare-OfflineRemovalTree')) {
     $definition = $functions | Where-Object Name -eq $name
     . ([scriptblock]::Create($definition.Extent.Text))
 }
@@ -118,6 +118,35 @@ try {
         Assert (Test-Path (Join-Path $fixture $relative)) "Browser removal damaged protected path: $relative"
     }
 
+    # Real filesystem links must be removed without touching external targets.
+    $outside = Join-Path $temp 'outside'
+    New-Item -ItemType Directory -Path $outside | Out-Null
+    [IO.File]::WriteAllText((Join-Path $outside 'keep.txt'), 'outside sentinel')
+    $linkedBrowser = Join-Path $fixture 'Program Files (x86)/Microsoft/Edge'
+    New-Item -ItemType Directory -Path $linkedBrowser -Force | Out-Null
+    $linkedPath = Join-Path $linkedBrowser 'external-link'
+    New-Item -ItemType SymbolicLink -Path $linkedPath -Target $outside | Out-Null
+    # fsutil is Windows-only; return the real symlink tag for this fixture.
+    function Get-OfflineReparseTag { param($Path) '0xa000000c' }
+    Remove-OfflineBrowserPayload $fixture | Out-Null
+    Assert (Test-Path (Join-Path $outside 'keep.txt')) 'Browser cleanup followed an external link'
+    Assert (-not (Test-Path $linkedBrowser)) 'Browser tree containing a link was not removed'
+
+    # Simulate a WOF-compressed file through the entry predicate, without fsutil.
+    $wofFile = [pscustomobject]@{ FullName = 'WOF-fixture'; Attributes = [IO.FileAttributes]::ReparsePoint; PSIsContainer = $false }
+    function Get-Item { param($LiteralPath, [switch]$Force, $ErrorAction) $wofFile }
+    function Get-OfflineReparseTag { param($Path) '0x80000017' }
+    Prepare-OfflineRemovalTree 'WOF-fixture'
+    Remove-Item Function:Get-Item
+    function Get-OfflineReparseTag { param($Path) '0x8000ffff' }
+    function Get-Item { param($LiteralPath, [switch]$Force, $ErrorAction) $wofFile }
+    $caught = $null
+    try { Prepare-OfflineRemovalTree 'unknown-fixture' } catch { $caught = $_ }
+    Assert ($null -ne $caught) 'Unknown reparse tag was accepted'
+    Remove-Item Function:Get-Item
+    # Restore the actual implementation for subsequent test sections.
+    . ([scriptblock]::Create(($functions | Where-Object Name -eq 'Get-OfflineReparseTag').Extent.Text))
+
     # Exercise the Micro package selection against optional, Ethernet, and core packages.
     foreach ($relative in @('Windows/Help', 'Windows/Web', 'Windows/Media', 'Windows/diagnostics', 'Windows/assembly/NativeImages_test')) {
         New-Item -ItemType Directory -Path (Join-Path $fixture $relative) -Force | Out-Null
@@ -193,7 +222,7 @@ try {
     . $bootBlock
     Assert ($script:BootCalls.Count -eq 2) 'Default boot servicing changed extra indexes'
     Assert ($script:BootCalls[0] -contains '/Index:2') 'Default servicing selected the wrong boot index'
-    'PASS: parse, overlays, read-only attributes, exit codes, cleanup, health gate, profiles, browser isolation, Micro removals, Ethernet driver preservation, boot driver routing.'
+    'PASS: parse, WOF handling, external-link isolation, overlays, read-only attributes, exit codes, cleanup, health gate, profiles, browser isolation, Micro removals, Ethernet driver preservation, boot driver routing.'
 
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force

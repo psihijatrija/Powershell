@@ -362,6 +362,43 @@ function Assert-DriversPreserved([object[]]$Before, [object[]]$After, [string]$L
     }
 }
 
+function Get-OfflineReparseTag([string]$Path) {
+    $output = @(& "$env:SystemRoot\System32\fsutil.exe" reparsepoint query $Path 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect reparse point: $Path. $($output -join ' ')" }
+    # The numeric tag is independent of fsutil's localized field labels.
+    $tag = [regex]::Match(($output -join "`n"), '(?i)0x[0-9a-f]{8}')
+    if (-not $tag.Success) { throw "No reparse tag returned for: $Path" }
+    return $tag.Value.ToLowerInvariant()
+}
+
+function Prepare-OfflineRemovalTree([string]$Path) {
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($Path)
+    while ($pending.Count -gt 0) {
+        $entry = Get-Item -LiteralPath $pending.Pop() -Force -ErrorAction Stop
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $tag = Get-OfflineReparseTag $entry.FullName
+            if ($tag -eq '0x80000017' -and -not $entry.PSIsContainer) {
+                # IO_REPARSE_TAG_WOF is a compressed file, not a redirected path.
+                continue
+            }
+            if ($tag -in @('0xa000000c', '0xa0000003')) {
+                # Unlink symbolic links/junctions themselves; never recurse into
+                # their destinations, even if the destination is outside the image.
+                if ($entry.PSIsContainer) { [IO.Directory]::Delete($entry.FullName) }
+                else { [IO.File]::Delete($entry.FullName) }
+                continue
+            }
+            throw "Unsupported reparse tag $tag at $($entry.FullName)"
+        }
+        if ($entry.PSIsContainer) {
+            foreach ($child in @(Get-ChildItem -LiteralPath $entry.FullName -Force -ErrorAction Stop)) {
+                $pending.Push($child.FullName)
+            }
+        }
+    }
+}
+
 function Remove-OfflineBrowserPayload([string]$MountPath, [ValidateSet('Browser', 'MicroData')][string]$Group = 'Browser') {
     if (-not (Test-Path -LiteralPath (Join-Path $MountPath 'Windows\System32\config\SYSTEM'))) {
         throw 'Browser removal requires a mounted offline Windows image.'
@@ -394,17 +431,20 @@ function Remove-OfflineBrowserPayload([string]$MountPath, [ValidateSet('Browser'
     foreach ($relative in $targets) {
         $target = Join-Path $MountPath $relative
         if (-not (Test-Path -LiteralPath $target)) { continue }
-        # Reject junctions before any recursive ownership change or deletion.
-        $probe = Get-Item -LiteralPath $target -Force
+        # Reject redirected ancestors; handle links inside the selected payload
+        # by unlinking them without following their targets.
+        $probe = (Get-Item -LiteralPath $target -Force)
+        if ($probe -is [IO.DirectoryInfo]) { $probe = $probe.Parent } else { $probe = $probe.Directory }
         while ($probe.FullName -ne (Get-Item -LiteralPath $MountPath).FullName) {
             if ($probe.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "Offline removal path contains a reparse point: $relative"
+                throw "Offline removal ancestor contains a reparse point: $relative"
             }
-            if ($probe -is [IO.DirectoryInfo]) { $probe = $probe.Parent } else { $probe = $probe.Directory }
+            $probe = $probe.Parent
         }
-        if (Get-ChildItem -LiteralPath $target -Recurse -Force |
-            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
-            throw "Offline removal payload contains reparse points: $relative"
+        Prepare-OfflineRemovalTree $target
+        if (-not (Test-Path -LiteralPath $target)) {
+            $removed += $relative
+            continue
         }
         Write-Step "Removing offline payload: $relative"
         try {
